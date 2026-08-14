@@ -1,0 +1,294 @@
+# oxo-flow port of nf-core/fetchngs 1.12.0
+# (https://github.com/nf-core/fetchngs, commit 8ec2d934f9301c818d961b1e4fdf7fc79610bdc5)
+#
+# Default-parameters main execution path: samplesheet check -> ENA metadata
+# fetch -> FastQ download (FTP, download_method = 'ftp') -> auto-created
+# samplesheet + id mappings + MultiQC mappings config.
+#
+# The sra-tools fallback (prefetch/fasterq-dump, incl. the sralite variant),
+# the Aspera path and dbGaP support are NOT ported — see the fidelity table
+# in README.md.
+
+[workflow]
+name = "fetchngs"
+version = "1.12.0"
+description = "Fetch metadata and raw FastQ files from public databases (SRA/ENA/DDBJ/GEO) - oxo-flow port of nf-core/fetchngs"
+author = "oxo-flow-community"
+
+[config]
+# File containing SRA/ENA/GEO/DDBJ identifiers, one per line (upstream --input).
+# Keep in sync with the [[sample_groups]] list below: check_ids validates this
+# file, the sample source drives the per-id expansion. Add extra ids on the
+# CLI with `oxo-flow run main.oxoflow --sample <ID>`.
+input = "test/fixtures/ids.txt"
+out_dir = "results"
+# Comma-separated ENA metadata fields; empty = upstream default field list.
+ena_metadata_fields = ""
+download_method = "ftp"
+skip_fastq_download = false
+# nf-core pipeline to tailor the samplesheet for (rnaseq/atacseq/taxprofiler); empty = none.
+nf_core_pipeline = ""
+nf_core_rnaseq_strandedness = "auto"
+sample_mapping_fields = "experiment_accession,run_accession,sample_accession,experiment_alias,run_alias,sample_alias,experiment_title,sample_title,sample_description"
+
+# One sample source for the default path (playbook §2.4): the database ids.
+[[sample_groups]]
+name = "ids"
+samples = ["SRR9984183", "DRR028935", "ERR1160846"]
+
+# ---------------------------------------------------------------------------
+# Samplesheet / input check (upstream PIPELINE_INITIALISATION: isSraId)
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "check_ids"
+description = "Validate the input ids file against the SRA/ENA/DDBJ/GEO accession regex and deduplicate"
+input = ["{config.input}"]
+output = ["{config.out_dir}/pipeline_info/input_ids.txt"]
+shell = "python scripts/check_ids.py {input} {output[0]}"
+required = true
+target = true
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+[rules.environment]
+docker = "quay.io/biocontainers/python:3.9--1"
+
+# ---------------------------------------------------------------------------
+# Metadata fetch (upstream SRA_IDS_TO_RUNINFO)
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "sra_ids_to_runinfo"
+description = "Fetch ENA run metadata for the database id into a tab-delimited runinfo file"
+input = []
+output = ["{config.out_dir}/metadata/{sample}.runinfo.tsv"]
+shell = """
+echo {sample} > id.txt
+metadata_fields=""
+if [ -n "{config.ena_metadata_fields}" ]; then
+    metadata_fields="--ena_metadata_fields {config.ena_metadata_fields}"
+fi
+python scripts/sra_ids_to_runinfo.py id.txt {output[0]} $metadata_fields
+"""
+retries = 2
+
+[rules.resources]
+threads = 1
+memory = "6G"
+time_limit = "4h"
+
+[rules.environment]
+docker = "quay.io/biocontainers/python:3.9--1"
+
+# ---------------------------------------------------------------------------
+# Parse run info, create file with FTP links (upstream SRA_RUNINFO_TO_FTP)
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "sra_runinfo_to_ftp"
+description = "Parse the runinfo file into per-run rows with FTP download links and md5 sums"
+input = ["{config.out_dir}/metadata/{sample}.runinfo.tsv"]
+output = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
+shell = "python scripts/sra_runinfo_to_ftp.py {input} {output[0]}"
+
+[rules.resources]
+threads = 1
+memory = "6G"
+time_limit = "4h"
+
+[rules.environment]
+docker = "quay.io/biocontainers/python:3.9--1"
+
+# ---------------------------------------------------------------------------
+# FastQ download via FTP (upstream SRA_FASTQ_FTP, download_method = 'ftp')
+#
+# One row per run in the runinfo_ftp.tsv; single-end writes <id>.fastq.gz,
+# paired-end writes <id>_1.fastq.gz + <id>_2.fastq.gz (id = <experiment>_<run>).
+# Each download is validated against the ENA md5 sum. wget flags, ordering and
+# file naming are byte-identical to the upstream process.
+#
+# No outputs are declared on purpose: the produced file set (single- vs
+# paired-end, per-run names) is data-dependent, so it cannot be expressed as
+# exact output patterns; the md5sum verification inside the command is the
+# correctness gate (as upstream).
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "sra_fastq_ftp"
+description = "Download FastQ files for each run via FTP and verify ENA md5 sums"
+input = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
+output = []
+when = '!config.skip_fastq_download && config.download_method == "ftp"'
+shell = """
+set -eu
+tsv="{input}"
+fastq_dir="{config.out_dir}/fastq"
+md5_dir="$fastq_dir/md5"
+mkdir -p "$fastq_dir" "$md5_dir"
+
+# Resolve column indices from the header (default ENA metadata fields)
+header=$(head -n 1 "$tsv")
+col_of() {
+    printf '%s\\n' "$header" | tr '\\t' '\\n' | grep -nx "$1" | cut -d: -f1
+}
+c_id=$(col_of id)
+c_fq1=$(col_of fastq_1)
+c_fq2=$(col_of fastq_2)
+c_md51=$(col_of md5_1)
+c_md52=$(col_of md5_2)
+c_se=$(col_of single_end)
+
+# One row per run: download each FastQ file and verify its md5sum
+tail -n +2 "$tsv" | while read -r line; do
+    run_id=$(printf '%s' "$line" | cut -f "$c_id")
+    fq1=$(printf '%s' "$line" | cut -f "$c_fq1")
+    md51=$(printf '%s' "$line" | cut -f "$c_md51")
+    if [ -z "$fq1" ]; then
+        echo "WARNING: no FTP link for ${run_id}; the sra-tools fallback is not ported, skipping" >&2
+        continue
+    fi
+    se=$(printf '%s' "$line" | cut -f "$c_se")
+    if [ "$se" = "true" ]; then
+        wget -t 5 -nv -c -T 60 -O "$fastq_dir/${run_id}.fastq.gz" "$fq1" || exit 1
+        echo "$md51  ${run_id}.fastq.gz" > "$md5_dir/${run_id}.fastq.gz.md5"
+        (cd "$fastq_dir" && md5sum -c "md5/${run_id}.fastq.gz.md5") || exit 1
+    else
+        fq2=$(printf '%s' "$line" | cut -f "$c_fq2")
+        md52=$(printf '%s' "$line" | cut -f "$c_md52")
+        wget -t 5 -nv -c -T 60 -O "$fastq_dir/${run_id}_1.fastq.gz" "$fq1" || exit 1
+        echo "$md51  ${run_id}_1.fastq.gz" > "$md5_dir/${run_id}_1.fastq.gz.md5"
+        (cd "$fastq_dir" && md5sum -c "md5/${run_id}_1.fastq.gz.md5") || exit 1
+        wget -t 5 -nv -c -T 60 -O "$fastq_dir/${run_id}_2.fastq.gz" "$fq2" || exit 1
+        echo "$md52  ${run_id}_2.fastq.gz" > "$md5_dir/${run_id}_2.fastq.gz.md5"
+        (cd "$fastq_dir" && md5sum -c "md5/${run_id}_2.fastq.gz.md5") || exit 1
+    fi
+done
+"""
+retries = 2
+
+[rules.resources]
+threads = 2
+memory = "12G"
+time_limit = "4h"
+
+[rules.environment]
+docker = "quay.io/biocontainers/wget:1.20.1"
+
+# ---------------------------------------------------------------------------
+# Auto-create samplesheet + id mappings (upstream SRA_TO_SAMPLESHEET)
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "sra_to_samplesheet"
+description = "Create a samplesheet row per run and the sample-id mappings file"
+input = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
+output = [
+    "{config.out_dir}/samplesheet/{sample}.samplesheet.csv",
+    "{config.out_dir}/samplesheet/{sample}.mappings.csv",
+]
+depends_on = ["sra_fastq_ftp"]
+when = "!config.skip_fastq_download"
+shell = "python scripts/sra_to_samplesheet.py {input} {output[0]} {output[1]} {config.out_dir} {config.nf_core_pipeline} {config.nf_core_rnaseq_strandedness} {config.sample_mapping_fields}"
+localrule = true
+
+[rules.resources]
+threads = 1
+memory = "100M"
+
+[rules.environment]
+docker = "quay.io/biocontainers/python:3.9--1"
+
+# ---------------------------------------------------------------------------
+# Merge per-id samplesheets into the final samplesheet
+# (upstream `collectFile(name:'samplesheet.csv', storeDir: outdir/samplesheet)`)
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "combine_samplesheets"
+description = "Concatenate per-id samplesheets (header once) into the final samplesheet.csv"
+input = []
+expand_inputs = [
+    { pattern = "{config.out_dir}/samplesheet/{sample}.samplesheet.csv", variables = { sample = "config.samples_list" } }
+]
+output = ["{config.out_dir}/samplesheet/samplesheet.csv"]
+depends_on = ["sra_to_samplesheet"]
+when = "!config.skip_fastq_download"
+target = true
+shell = """
+set -eu
+out={output[0]}
+mkdir -p {config.out_dir}/samplesheet
+files=$(echo {input} | tr ' ' '\\n' | sort)
+if [ -z "$files" ]; then
+    : > "$out"
+else
+    first=1
+    for f in $files; do
+        if [ "$first" -eq 1 ]; then
+            cat "$f" > "$out"
+            first=0
+        else
+            tail -n +2 "$f" >> "$out"
+        fi
+    done
+fi
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+# ---------------------------------------------------------------------------
+# Merge per-id mappings into id_mappings.csv
+# (upstream `collectFile(name:'id_mappings.csv', storeDir: outdir/samplesheet)`)
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "combine_mappings"
+description = "Concatenate per-id mappings files (header once) into the final id_mappings.csv"
+input = []
+expand_inputs = [
+    { pattern = "{config.out_dir}/samplesheet/{sample}.mappings.csv", variables = { sample = "config.samples_list" } }
+]
+output = ["{config.out_dir}/samplesheet/id_mappings.csv"]
+depends_on = ["sra_to_samplesheet"]
+when = "!config.skip_fastq_download"
+shell = """
+set -eu
+out={output[0]}
+mkdir -p {config.out_dir}/samplesheet
+files=$(echo {input} | tr ' ' '\\n' | sort)
+if [ -z "$files" ]; then
+    : > "$out"
+else
+    first=1
+    for f in $files; do
+        if [ "$first" -eq 1 ]; then
+            cat "$f" > "$out"
+            first=0
+        else
+            tail -n +2 "$f" >> "$out"
+        fi
+    done
+fi
+"""
+
+[rules.resources]
+threads = 1
+memory = "1G"
+
+# ---------------------------------------------------------------------------
+# MultiQC config with sample name mappings (upstream MULTIQC_MAPPINGS_CONFIG)
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "multiqc_mappings_config"
+description = "Create a MultiQC config file with sample name mappings"
+input = ["{config.out_dir}/samplesheet/id_mappings.csv"]
+output = ["{config.out_dir}/samplesheet/multiqc_config.yml"]
+when = 'config.sample_mapping_fields != ""'
+target = true
+shell = "python scripts/multiqc_mappings_config.py {input} {output[0]}"
+
+[rules.resources]
+threads = 1
+memory = "6G"
+time_limit = "4h"
+
+[rules.environment]
+docker = "quay.io/biocontainers/python:3.9--1"
