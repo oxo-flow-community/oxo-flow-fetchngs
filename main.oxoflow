@@ -62,6 +62,10 @@ docker = "quay.io/biocontainers/python:3.9--1"
 name = "sra_ids_to_runinfo"
 description = "Fetch ENA run metadata for the database id into a tab-delimited runinfo file"
 input = []
+# Upstream gates every downstream step on the validated id list
+# (PIPELINE_INITIALISATION feeds the channel). Declare the ordering
+# explicitly: id validation must complete before any per-id fetch starts.
+depends_on = ["check_ids"]
 output = ["{config.out_dir}/metadata/{sample}.runinfo.tsv"]
 shell = """
 echo {sample} > id.txt
