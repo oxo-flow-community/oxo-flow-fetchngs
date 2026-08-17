@@ -136,7 +136,12 @@ def sra_runinfo_to_ftp(files_in, file_out):
     # Write samplesheet with paths to FastQ files and md5 sums.
     if samplesheet:
         with file_out.open("w", newline="") as fout:
-            writer = csv.DictWriter(fout, fieldnames=combined_header, delimiter="\t")
+            # lineterminator="\n": csv's default "\r\n" leaves a trailing \r
+            # on every field, which breaks the downstream cut -f lookups
+            # ("cut: missing list of positions", live-run evidence).
+            writer = csv.DictWriter(
+                fout, fieldnames=combined_header, delimiter="\t", lineterminator="\n"
+            )
             writer.writeheader()
             for db_id in sorted(samplesheet):
                 for idx, row in enumerate(samplesheet[db_id], start=1):
