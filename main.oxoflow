@@ -186,7 +186,7 @@ output = [
 ]
 depends_on = ["sra_fastq_ftp"]
 when = "!config.skip_fastq_download"
-shell = "python scripts/sra_to_samplesheet.py {input} {output[0]} {output[1]} {config.out_dir} {config.nf_core_pipeline} {config.nf_core_rnaseq_strandedness} {config.sample_mapping_fields}"
+shell = "python scripts/sra_to_samplesheet.py \"{input}\" \"{output[0]}\" \"{output[1]}\" \"{config.out_dir}\" \"{config.nf_core_pipeline}\" \"{config.nf_core_rnaseq_strandedness}\" \"{config.sample_mapping_fields}\""
 localrule = true
 
 [rules.resources]
