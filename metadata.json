@@ -28,31 +28,34 @@
     "sra_ids_to_runinfo",
     "sra_runinfo_to_ftp",
     "sra_fastq_ftp",
+    "sra_fastq_aspera",
+    "sratools_ncbi_settings",
+    "sra_fastq_sratools",
     "sra_to_samplesheet",
     "combine_samplesheets",
     "combine_mappings",
     "multiqc_mappings_config"
   ],
   "excluded": [
-    "sratools download path (prefetch/fasterq-dump incl. sralite variant) — data-dependent per-run fallback for runs without FTP links, not on the default ftp path",
-    "aspera download path (ASPERA_CLI / fasp links) — download_method=aspera only",
-    "dbGaP (--dbgap_key) — sratools-path only",
     "softwareVersionsToYAML + versions.yml, PIPELINE_COMPLETION — nf-core boilerplate"
   ],
-  "rule_count": 8,
+  "rule_count": 11,
   "tools": [
     "python",
     "wget",
-    "coreutils"
+    "coreutils",
+    "sra-tools",
+    "pigz",
+    "aspera-cli"
   ],
-  "description": "Fetch metadata and raw FastQ files from public sequence databases (SRA/ENA/DDBJ/GEO). Given a list of database identifiers — run accessions (SRR/ERR/DRR), experiments, studies, biosamples or GEO series — the pipeline retrieves the ENA run metadata, downloads the FastQ files over FTP, validates every download against its ENA md5 sum, and auto-creates a samplesheet plus sample id-mappings and a MultiQC mappings config, ready for downstream nf-core pipelines such as rnaseq, atacseq or taxprofiler.",
+  "description": "Fetch metadata and raw FastQ files from public sequence databases (SRA/ENA/DDBJ/GEO). Given a list of database identifiers — run accessions (SRR/ERR/DRR), experiments, studies, biosamples or GEO series — the pipeline retrieves the ENA run metadata, downloads the FastQ files (FTP by default; Aspera and sra-tools methods with dbGaP support), validates every download against its ENA md5 sum (or vdb-validate on the sra-tools path), and auto-creates a samplesheet plus sample id-mappings and a MultiQC mappings config, ready for downstream nf-core pipelines such as rnaseq, atacseq, viralrecon or taxprofiler. Live-verified: default FTP path, metadata-only mode (skip_fastq_download), and the forced sra-tools path (prefetch + fasterq-dump).",
   "installation": {
     "engine": "oxo-flow >= 0.12.0",
     "toolchain": "containers (Docker) — pinned images (quay.io/biocontainers, identical to upstream)",
     "requirements": [
       "ids file: one SRA/ENA/DDBJ/GEO accession per line (config.input, default test/fixtures/ids.txt), kept in sync with the [[sample_groups]] sample source",
       "reference data: none — the workflow downloads data from public archives; no genome FASTA, annotation or indices required",
-      "network: outbound access to ENA over FTP (wget -t 5 -c -T 60, 2 retries)",
+      "network: outbound access to ENA over FTP (wget -t 5 -c -T 60, 2 retries); sra-tools path needs NCBI egress; Aspera path needs port 33001 egress",
       "compute: up to 2 CPUs / 12 GB per rule (FastQ download 2 threads/12G; metadata fetch 1 thread/6G; 4 h time limits on three rules)",
       "disk: results/fastq/ grows with downloaded FastQ files plus md5/ checksums (depends on input size); metadata/ and samplesheet/ stay small"
     ]
