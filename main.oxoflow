@@ -68,12 +68,16 @@ input = []
 depends_on = ["check_ids"]
 output = ["{config.out_dir}/metadata/{sample}.runinfo.tsv"]
 shell = """
-echo {sample} > id.txt
+# Per-sample temp file: the docker workdir is shared across concurrent
+# rules, and a fixed `id.txt` let parallel id rules clobber each other
+# (live: all three runinfo tsvs held the same id's row).
+echo {sample} > ".id_{sample}.txt"
 metadata_fields=""
 if [ -n "{config.ena_metadata_fields}" ]; then
     metadata_fields="--ena_metadata_fields {config.ena_metadata_fields}"
 fi
-python scripts/sra_ids_to_runinfo.py id.txt {output[0]} $metadata_fields
+python scripts/sra_ids_to_runinfo.py ".id_{sample}.txt" {output[0]} $metadata_fields
+rm -f ".id_{sample}.txt"
 """
 retries = 2
 
