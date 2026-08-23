@@ -154,20 +154,29 @@ tail -n +2 "$tsv" | while read -r line; do
         echo "WARNING: no FTP link for ${run_id}; the sra-tools fallback is not ported, skipping" >&2
         continue
     fi
+    # Download only when the file is absent or fails its md5 (idempotent
+    # re-runs; live: wget -c appended corrupt proxy data to a complete
+    # staged file and the subsequent md5 check failed).
+    fetch_verified() {
+        url="$1"
+        out="$2"
+        expected="$3"
+        base=$(basename "$out")
+        if [ -f "$out" ] && printf '%s  %s\n' "$expected" "$base" | (cd "$fastq_dir" && md5sum -c - > /dev/null 2>&1); then
+            return 0
+        fi
+        wget -t 5 -nv -c -T 60 -O "$out" "$url" || exit 1
+        printf '%s  %s\n' "$expected" "$base" > "$md5_dir/${base}.md5"
+        (cd "$fastq_dir" && md5sum -c "md5/${base}.md5") || exit 1
+    }
     se=$(printf '%s' "$line" | cut -f "$c_se")
     if [ "$se" = "true" ]; then
-        wget -t 5 -nv -c -T 60 -O "$fastq_dir/${run_id}.fastq.gz" "$fq1" || exit 1
-        echo "$md51  ${run_id}.fastq.gz" > "$md5_dir/${run_id}.fastq.gz.md5"
-        (cd "$fastq_dir" && md5sum -c "md5/${run_id}.fastq.gz.md5") || exit 1
+        fetch_verified "$fq1" "$fastq_dir/${run_id}.fastq.gz" "$md51"
     else
         fq2=$(printf '%s' "$line" | cut -f "$c_fq2")
         md52=$(printf '%s' "$line" | cut -f "$c_md52")
-        wget -t 5 -nv -c -T 60 -O "$fastq_dir/${run_id}_1.fastq.gz" "$fq1" || exit 1
-        echo "$md51  ${run_id}_1.fastq.gz" > "$md5_dir/${run_id}_1.fastq.gz.md5"
-        (cd "$fastq_dir" && md5sum -c "md5/${run_id}_1.fastq.gz.md5") || exit 1
-        wget -t 5 -nv -c -T 60 -O "$fastq_dir/${run_id}_2.fastq.gz" "$fq2" || exit 1
-        echo "$md52  ${run_id}_2.fastq.gz" > "$md5_dir/${run_id}_2.fastq.gz.md5"
-        (cd "$fastq_dir" && md5sum -c "md5/${run_id}_2.fastq.gz.md5") || exit 1
+        fetch_verified "$fq1" "$fastq_dir/${run_id}_1.fastq.gz" "$md51"
+        fetch_verified "$fq2" "$fastq_dir/${run_id}_2.fastq.gz" "$md52"
     fi
 done
 """
