@@ -5,9 +5,16 @@
 # fetch -> FastQ download (FTP, download_method = 'ftp') -> auto-created
 # samplesheet + id mappings + MultiQC mappings config.
 #
-# The sra-tools fallback (prefetch/fasterq-dump, incl. the sralite variant),
-# the Aspera path and dbGaP support are NOT ported — see the fidelity table
-# in README.md.
+# The alternative download branches are ported as when-gated rules, all off
+# by default (download_method = 'ftp', matching upstream):
+#   - 'sratools'  -> sra_prefetch + sra_fastq_sratools (prefetch/fasterq-dump
+#                    incl. the .sralite variant, sra-tools 3.0.8 / 2.11.0)
+#   - 'aspera'    -> sra_fastq_aspera (Aspera CLI 4.14.0, ENA fasp links)
+# The per-run data-dependent sra-tools fallback (runs without FTP links when
+# download_method = 'ftp') is NOT expressible in oxo-flow and stays excluded,
+# as does dbGaP (--dbgap_key, needs authorized-access credentials) and the
+# nf-core boilerplate (versions.yml / PIPELINE_COMPLETION) — see the fidelity
+# table in README.md.
 
 [workflow]
 name = "fetchngs"
@@ -24,6 +31,9 @@ input = "test/fixtures/ids.txt"
 out_dir = "results"
 # Comma-separated ENA metadata fields; empty = upstream default field list.
 ena_metadata_fields = ""
+# Download method, one of 'ftp' (upstream default), 'sratools' or 'aspera'.
+# Each method gates its own branch of download rules; the default 'ftp'
+# plan is unchanged when the other branches are off.
 download_method = "ftp"
 skip_fastq_download = false
 # nf-core pipeline to tailor the samplesheet for (rnaseq/atacseq/taxprofiler); empty = none.
@@ -151,7 +161,7 @@ tail -n +2 "$tsv" | while read -r line; do
     fq1=$(printf '%s' "$line" | cut -f "$c_fq1")
     md51=$(printf '%s' "$line" | cut -f "$c_md51")
     if [ -z "$fq1" ]; then
-        echo "WARNING: no FTP link for ${run_id}; the sra-tools fallback is not ported, skipping" >&2
+        echo "WARNING: no FTP link for ${run_id}; upstream would route this run to the per-run sra-tools fallback (not expressible in oxo-flow), skipping" >&2
         continue
     fi
     # Download only when the file is absent or fails its md5 (idempotent
@@ -191,6 +201,249 @@ time_limit = "4h"
 docker = "quay.io/biocontainers/wget:1.20.1"
 
 # ---------------------------------------------------------------------------
+# SRA-tools download path (upstream CUSTOM_SRATOOLSNCBISETTINGS +
+# SRATOOLS_PREFETCH, download_method = 'sratools')
+#
+# Upstream routes runs WITHOUT FTP links to sra-tools per run at runtime;
+# the explicit `--download_method sratools` mode sends ALL runs here, which
+# is what this when-gated branch implements. The per-run fallback itself is
+# not expressible in oxo-flow (no per-row branching): with
+# download_method = 'ftp', runs without FTP links are skipped with a warning
+# (see sra_fastq_ftp). Prefetch writes <run_accession>.sra / .sralite into
+# results/sra/<id>/ (upstream publishDir results/sra, enabled: false — the
+# files are intermediates for fasterq-dump only). The NCBI settings file
+# (fresh GUID, upstream CUSTOM_SRATOOLSNCBISETTINGS) is written per sample
+# because the docker workdir is shared across concurrent rules.
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "sra_prefetch"
+description = "Prefetch SRA records with sra-tools and validate them with vdb-validate"
+input = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
+output = []
+when = '!config.skip_fastq_download && config.download_method == "sratools"'
+shell = """
+set -eu
+tsv="{input}"
+sra_dir="{config.out_dir}/sra/{sample}"
+mkdir -p "$sra_dir"
+
+# Upstream CUSTOM_SRATOOLSNCBISETTINGS: fresh NCBI user settings with a GUID
+# and cloud identity reporting; per-sample file name (shared docker workdir)
+guid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s%N)
+printf '/LIBS/GUID = "%s"\\n/libs/cloud/report_instance_identity = "true"\\n' "$guid" > ".ncbi_{sample}.mkfg"
+export NCBI_SETTINGS="$PWD/.ncbi_{sample}.mkfg"
+
+# Resolve column indices from the header (default ENA metadata fields)
+header=$(head -n 1 "$tsv")
+col_of() {
+    printf '%s\\n' "$header" | tr '\\t' '\\n' | grep -nx "$1" | cut -d: -f1
+}
+c_run=$(col_of run_accession)
+
+# Upstream prefetch retry policy: 5 attempts, 1 s base delay, 100 s max
+source scripts/retry_with_backoff.sh
+
+# One row per run: prefetch the SRA record, then validate it. The retry
+# helper manages failed attempts itself, so `set -e` is disabled around the
+# call and the captured status is checked explicitly.
+tail -n +2 "$tsv" | while read -r line; do
+    run=$(printf '%s' "$line" | cut -f "$c_run")
+    if [ -z "$run" ]; then
+        echo "WARNING: row without run_accession skipped" >&2
+        continue
+    fi
+    (
+        cd "$sra_dir"
+        set +e
+        retry_with_backoff 5 1 100 prefetch "$run"
+        prefetch_status=$?
+        set -e
+        if [ "$prefetch_status" -ne 0 ]; then
+            echo "prefetch failed for $run after retries" >&2
+            exit "$prefetch_status"
+        fi
+        if [ -f "$run.sralite" ]; then
+            vdb-validate "$run.sralite"
+        else
+            vdb-validate "$run"
+        fi
+    )
+done
+"""
+retries = 2
+
+[rules.resources]
+threads = 1
+memory = "2G"
+time_limit = "4h"
+
+[rules.environment]
+docker = "quay.io/biocontainers/sra-tools:3.0.8--h9f5acd7_0"
+
+# ---------------------------------------------------------------------------
+# fasterq-dump + pigz (upstream SRATOOLS_FASTERQDUMP, download_method =
+# 'sratools')
+#
+# Converts the prefetched SRA records into compressed FastQ with the
+# upstream naming (`<id>.fastq.gz` single-end, `<id>_1.fastq.gz` +
+# `<id>_2.fastq.gz` paired, id = <experiment>_<run>) — identical to the FTP
+# branch — and moves them into results/fastq/. fasterq-dump runs in a
+# per-run temp dir so concurrent rule instances in the shared docker workdir
+# cannot cross-talk (pigz would otherwise glob another instance's fastq).
+# Same no-outputs convention as sra_fastq_ftp: the produced file set is
+# data-dependent.
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "sra_fastq_sratools"
+description = "Convert prefetched SRA records to compressed FastQ with fasterq-dump and pigz"
+input = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
+output = []
+depends_on = ["sra_prefetch"]
+when = '!config.skip_fastq_download && config.download_method == "sratools"'
+shell = """
+set -eu
+tsv="{input}"
+sra_dir="{config.out_dir}/sra/{sample}"
+fastq_dir="{config.out_dir}/fastq"
+mkdir -p "$fastq_dir"
+
+# Fresh NCBI settings as in sra_prefetch (fasterq-dump requires them too)
+guid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s%N)
+printf '/LIBS/GUID = "%s"\\n/libs/cloud/report_instance_identity = "true"\\n' "$guid" > ".ncbi_{sample}.mkfg"
+export NCBI_SETTINGS="$PWD/.ncbi_{sample}.mkfg"
+
+# Resolve column indices from the header (default ENA metadata fields)
+header=$(head -n 1 "$tsv")
+col_of() {
+    printf '%s\\n' "$header" | tr '\\t' '\\n' | grep -nx "$1" | cut -d: -f1
+}
+c_id=$(col_of id)
+c_run=$(col_of run_accession)
+c_se=$(col_of single_end)
+
+# One row per run: fasterq-dump the prefetched record, compress with pigz
+tail -n +2 "$tsv" | while read -r line; do
+    run_id=$(printf '%s' "$line" | cut -f "$c_id")
+    run=$(printf '%s' "$line" | cut -f "$c_run")
+    se=$(printf '%s' "$line" | cut -f "$c_se")
+    if [ -z "$run" ]; then
+        echo "WARNING: no run accession for ${run_id}; skipping" >&2
+        continue
+    fi
+    sra_file="$sra_dir/$run.sra"
+    [ -f "$sra_file" ] || sra_file="$sra_dir/$run.sralite"
+    if [ ! -f "$sra_file" ]; then
+        echo "ERROR: prefetched SRA file for ${run} not found in $sra_dir" >&2
+        exit 1
+    fi
+    d=".fd_{sample}_${run}"
+    mkdir -p "$d"
+    (
+        cd "$d"
+        if [ "$se" = "true" ]; then
+            fasterq-dump --split-files --include-technical --threads 2 --outfile "${run_id}.fastq" "$sra_file"
+        else
+            fasterq-dump --split-files --include-technical --threads 2 --outfile "$run_id" "$sra_file"
+        fi
+        pigz --no-name --processes 2 ./*.fastq
+        mv ./*.fastq.gz "$fastq_dir/"
+    )
+    rm -rf "$d"
+done
+"""
+retries = 2
+
+[rules.resources]
+threads = 2
+memory = "8G"
+time_limit = "4h"
+
+[rules.environment]
+docker = "quay.io/biocontainers/mulled-v2-5f89fe0cd045cb1d615630b9261a1d17943a9b6a:6a9ff0e76ec016c3d0d27e0c0d362339f2d787e6-0"
+
+# ---------------------------------------------------------------------------
+# Aspera download path (upstream ASPERA_CLI, download_method = 'aspera')
+#
+# Downloads via the ENA fasp links with the Aspera CLI shipped in the pinned
+# biocontainer (anonymous `era-fasp` user + pre-installed bypass key — no
+# credentials; the image is the same upstream uses). ascp flags
+# `-QT -l 300m -P33001` from the upstream module config. Upstream also sends
+# runs without fasp links to the ftp / sra-tools branches per run; oxo-flow
+# cannot branch per-row, so such runs are skipped with a warning (deviation,
+# see README).
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "sra_fastq_aspera"
+description = "Download FastQ files for each run via ENA fasp links with Aspera CLI and verify ENA md5 sums"
+input = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
+output = []
+when = '!config.skip_fastq_download && config.download_method == "aspera"'
+shell = """
+set -eu
+tsv="{input}"
+fastq_dir="{config.out_dir}/fastq"
+md5_dir="$fastq_dir/md5"
+mkdir -p "$fastq_dir" "$md5_dir"
+
+# Resolve column indices from the header (default ENA metadata fields;
+# fastq_aspera is part of the upstream default field list)
+header=$(head -n 1 "$tsv")
+col_of() {
+    printf '%s\\n' "$header" | tr '\\t' '\\n' | grep -nx "$1" | cut -d: -f1
+}
+c_id=$(col_of id)
+c_fasp=$(col_of fastq_aspera)
+c_md51=$(col_of md5_1)
+c_md52=$(col_of md5_2)
+c_se=$(col_of single_end)
+
+# One row per run: download each FastQ file over fasp and verify its md5sum
+tail -n +2 "$tsv" | while read -r line; do
+    run_id=$(printf '%s' "$line" | cut -f "$c_id")
+    fasp=$(printf '%s' "$line" | cut -f "$c_fasp")
+    md51=$(printf '%s' "$line" | cut -f "$c_md51")
+    if [ -z "$fasp" ]; then
+        echo "WARNING: no fasp link for ${run_id}; upstream would fall back to the ftp/sra-tools branches, skipping" >&2
+        continue
+    fi
+    # Download only when the file is absent or fails its md5 (idempotent
+    # re-runs, same pattern as the ftp branch)
+    fetch_verified() {
+        url="$1"
+        out="$2"
+        expected="$3"
+        base=$(basename "$out")
+        if [ -f "$out" ] && printf '%s  %s\\n' "$expected" "$base" | (cd "$fastq_dir" && md5sum -c - > /dev/null 2>&1); then
+            return 0
+        fi
+        rm -f "$out"
+        ascp -QT -l 300m -P33001 -i /usr/local/etc/aspera/aspera_bypass_dsa.pem "era-fasp@$url" "$out" || exit 1
+        printf '%s  %s\\n' "$expected" "$base" > "$md5_dir/${base}.md5"
+        (cd "$fastq_dir" && md5sum -c "md5/${base}.md5") || exit 1
+    }
+    fasp1=$(printf '%s' "$line" | cut -f "$c_fasp" | cut -d';' -f1)
+    fasp2=$(printf '%s' "$line" | cut -f "$c_fasp" | cut -d';' -f2)
+    se=$(printf '%s' "$line" | cut -f "$c_se")
+    if [ "$se" = "true" ]; then
+        fetch_verified "$fasp1" "$fastq_dir/${run_id}.fastq.gz" "$md51"
+    else
+        md52=$(printf '%s' "$line" | cut -f "$c_md52")
+        fetch_verified "$fasp1" "$fastq_dir/${run_id}_1.fastq.gz" "$md51"
+        fetch_verified "$fasp2" "$fastq_dir/${run_id}_2.fastq.gz" "$md52"
+    fi
+done
+"""
+retries = 2
+
+[rules.resources]
+threads = 1
+memory = "4G"
+time_limit = "4h"
+
+[rules.environment]
+docker = "quay.io/biocontainers/aspera-cli:4.14.0--hdfd78af_1"
+
+# ---------------------------------------------------------------------------
 # Auto-create samplesheet + id mappings (upstream SRA_TO_SAMPLESHEET)
 # ---------------------------------------------------------------------------
 [[rules]]
@@ -201,7 +454,10 @@ output = [
     "{config.out_dir}/samplesheet/{sample}.samplesheet.csv",
     "{config.out_dir}/samplesheet/{sample}.mappings.csv",
 ]
-depends_on = ["sra_fastq_ftp"]
+# Exactly one of the three download branches is active per run
+# (download_method); the others are skipped and skipped rules satisfy
+# dependencies, so listing all three is safe.
+depends_on = ["sra_fastq_ftp", "sra_fastq_sratools", "sra_fastq_aspera"]
 when = "!config.skip_fastq_download"
 shell = "python scripts/sra_to_samplesheet.py \"{input}\" \"{output[0]}\" \"{output[1]}\" \"{config.out_dir}\" \"{config.nf_core_pipeline}\" \"{config.nf_core_rnaseq_strandedness}\" \"{config.sample_mapping_fields}\""
 localrule = true
