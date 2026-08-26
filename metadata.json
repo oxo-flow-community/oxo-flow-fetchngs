@@ -31,17 +31,20 @@
     "sra_prefetch",
     "sra_fastq_sratools",
     "sra_fastq_aspera",
+    "sra_prefetch_fallback",
+    "sra_fastq_sratools_fallback",
+    "sra_prefetch_dbgap",
+    "sra_fastq_sratools_dbgap",
     "sra_to_samplesheet",
     "combine_samplesheets",
     "combine_mappings",
     "multiqc_mappings_config"
   ],
   "excluded": [
-    "sratools per-run fallback (prefetch/fasterq-dump incl. sralite variant) — data-dependent per-row routing of runs without FTP links when download_method=ftp; the explicit download_method=sratools branch IS ported",
-    "dbGaP (--dbgap_key) — needs NIH authorized-access credentials (controlled-access data); the public sratools path works without it",
-    "softwareVersionsToYAML + versions.yml, PIPELINE_COMPLETION — nf-core boilerplate"
+    "softwareVersionsToYAML + versions.yml, PIPELINE_COMPLETION (emails/summary/hooks) — nf-core boilerplate: a faithful versions.yml port needs every rule to emit a per-process versions.yml (would change every rule command; the default plan is byte-identical) and the collected file has no consumer in fetchngs itself; PIPELINE_COMPLETION is workflow-level completion hooks (sendmail/webhook) that oxo-flow has no mechanism for",
+    "per-run row triage that requires different containers per row: with download_method=aspera, runs that have an FTP link but no fasp link go to the FTP branch upstream (no per-row container switch in oxo-flow); the equivalent sratools triage IS ported as a when-gated branch (sra_tools_fallback) and dbGaP certificate pass-through IS ported (dbgap_key)"
   ],
-  "rule_count": 11,
+  "rule_count": 15,
   "tools": [
     "python",
     "wget",
