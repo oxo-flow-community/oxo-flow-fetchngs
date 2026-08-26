@@ -10,11 +10,15 @@
 #   - 'sratools'  -> sra_prefetch + sra_fastq_sratools (prefetch/fasterq-dump
 #                    incl. the .sralite variant, sra-tools 3.0.8 / 2.11.0)
 #   - 'aspera'    -> sra_fastq_aspera (Aspera CLI 4.14.0, ENA fasp links)
-# The per-run data-dependent sra-tools fallback (runs without FTP links when
-# download_method = 'ftp') is NOT expressible in oxo-flow and stays excluded,
-# as does dbGaP (--dbgap_key, needs authorized-access credentials) and the
-# nf-core boilerplate (versions.yml / PIPELINE_COMPLETION) — see the fidelity
-# table in README.md.
+#   - per-run sratools fallback (upstream `branch` triage: with
+#     download_method = 'ftp', runs without FTP/fasp links go to
+#     prefetch/fasterq-dump) -> sra_prefetch_fallback +
+#     sra_fastq_sratools_fallback, gated on sra_tools_fallback = true
+#   - dbGaP (--dbgap_key) -> sra_prefetch_dbgap + sra_fastq_sratools_dbgap,
+#     gated on dbgap_key being set; the certificate is passed through
+#     verbatim (--ngc/--perm), the port itself needs no credentials
+# The nf-core boilerplate (versions.yml collection, PIPELINE_COMPLETION
+# emails/summary/hooks) stays excluded — see the fidelity table in README.md.
 
 [workflow]
 name = "fetchngs"
@@ -36,6 +40,18 @@ ena_metadata_fields = ""
 # plan is unchanged when the other branches are off.
 download_method = "ftp"
 skip_fastq_download = false
+# Per-run sra-tools fallback (upstream SRA workflow `branch`): with
+# download_method = 'ftp', runs whose ENA metadata has NEITHER an FTP link
+# (fastq_1) NOR a fasp link (fastq_aspera) are routed to prefetch +
+# fasterq-dump at runtime. Ported as a when-gated branch, off by default so
+# the default 'ftp' plan stays byte-identical; enable to match upstream's
+# default per-run triage.
+sra_tools_fallback = false
+# dbGaP authorized-access certificate for the sratools branch (upstream
+# --dbgap_key): path to a .ngc or .jwt file. Empty = public data only — the
+# public sratools branch works without it; when set, the certificate is
+# passed through verbatim (prefetch/fasterq-dump --ngc or --perm).
+dbgap_key = ""
 # nf-core pipeline to tailor the samplesheet for (rnaseq/atacseq/taxprofiler); empty = none.
 nf_core_pipeline = ""
 nf_core_rnaseq_strandedness = "auto"
@@ -207,20 +223,25 @@ docker = "quay.io/biocontainers/wget:1.20.1"
 # Upstream routes runs WITHOUT FTP links to sra-tools per run at runtime;
 # the explicit `--download_method sratools` mode sends ALL runs here, which
 # is what this when-gated branch implements. The per-run fallback itself is
-# not expressible in oxo-flow (no per-row branching): with
-# download_method = 'ftp', runs without FTP links are skipped with a warning
-# (see sra_fastq_ftp). Prefetch writes <run_accession>.sra / .sralite into
-# results/sra/<id>/ (upstream publishDir results/sra, enabled: false — the
-# files are intermediates for fasterq-dump only). The NCBI settings file
-# (fresh GUID, upstream CUSTOM_SRATOOLSNCBISETTINGS) is written per sample
-# because the docker workdir is shared across concurrent rules.
+# ported as a when-gated branch (sra_prefetch_fallback +
+# sra_fastq_sratools_fallback, off by default via sra_tools_fallback = false
+# so the default plan is unchanged); without it, ftp-method runs without
+# FTP links are skipped with a warning (see sra_fastq_ftp). Prefetch writes
+# <run_accession>.sra / .sralite into results/sra/<id>/ (upstream publishDir
+# results/sra, enabled: false — the files are intermediates for
+# fasterq-dump only). The NCBI settings file (fresh GUID, upstream
+# CUSTOM_SRATOOLSNCBISETTINGS) is written per sample because the docker
+# workdir is shared across concurrent rules.
 # ---------------------------------------------------------------------------
 [[rules]]
 name = "sra_prefetch"
 description = "Prefetch SRA records with sra-tools and validate them with vdb-validate"
 input = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
 output = []
-when = '!config.skip_fastq_download && config.download_method == "sratools"'
+# The dbgap variant (sra_prefetch_dbgap) takes over when a certificate is
+# configured; both branches evaluate to skipped in the default config, so
+# the default plan is unchanged.
+when = '!config.skip_fastq_download && config.download_method == "sratools" && config.dbgap_key == ""'
 shell = """
 set -eu
 tsv="{input}"
@@ -299,7 +320,9 @@ description = "Convert prefetched SRA records to compressed FastQ with fasterq-d
 input = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
 output = []
 depends_on = ["sra_prefetch"]
-when = '!config.skip_fastq_download && config.download_method == "sratools"'
+# As with sra_prefetch: the dbgap variant takes over when a certificate is
+# configured; skipped in the default config, so the default plan is unchanged.
+when = '!config.skip_fastq_download && config.download_method == "sratools" && config.dbgap_key == ""'
 shell = """
 set -eu
 tsv="{input}"
@@ -351,6 +374,104 @@ tail -n +2 "$tsv" | while read -r line; do
     rm -rf "$d"
 done
 """
+retries = 2
+
+[rules.resources]
+threads = 2
+memory = "8G"
+time_limit = "4h"
+
+[rules.environment]
+docker = "quay.io/biocontainers/mulled-v2-5f89fe0cd045cb1d615630b9261a1d17943a9b6a:6a9ff0e76ec016c3d0d27e0c0d362339f2d787e6-0"
+
+# ---------------------------------------------------------------------------
+# Per-run sra-tools fallback (upstream SRA workflow `branch`, download_method
+# = 'ftp' + sra_tools_fallback = true)
+#
+# Upstream triages each run at runtime: with download_method = 'ftp', runs
+# whose metadata has NEITHER an FTP link (fastq_1) NOR a fasp link
+# (fastq_aspera) are sent to prefetch + fasterq-dump per run (branch
+# condition `!meta.fastq_aspera && !meta.fastq_1`). oxo-flow cannot branch
+# per row, so the triage is ported as a when-gated branch off by default:
+# when enabled, these two rules prefetch exactly that subset (the shared
+# scripts re-derive it from the runinfo tsv) and the FTP rule keeps
+# downloading the runs that do have links. Same no-outputs convention as the
+# sratools-method branch: intermediates land in results/sra/{sample}/, the
+# produced fastq set is data-dependent.
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "sra_prefetch_fallback"
+description = "Prefetch SRA records for runs without FTP/fasp links (upstream per-run sratools fallback) and validate them with vdb-validate"
+input = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
+output = []
+when = '!config.skip_fastq_download && config.download_method == "ftp" && config.sra_tools_fallback'
+shell = "bash scripts/sra_prefetch_runs.sh --fallback \"{input}\" \"{config.out_dir}/sra/{sample}\""
+retries = 2
+
+[rules.resources]
+threads = 1
+memory = "2G"
+time_limit = "4h"
+
+[rules.environment]
+docker = "quay.io/biocontainers/sra-tools:3.0.8--h9f5acd7_0"
+
+[[rules]]
+name = "sra_fastq_sratools_fallback"
+description = "Convert prefetched SRA records of fallback runs to compressed FastQ with fasterq-dump and pigz"
+input = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
+output = []
+depends_on = ["sra_prefetch_fallback"]
+when = '!config.skip_fastq_download && config.download_method == "ftp" && config.sra_tools_fallback'
+shell = "bash scripts/sra_fastq_sratools_runs.sh --fallback \"{input}\" \"{config.out_dir}/sra/{sample}\" \"{config.out_dir}/fastq\""
+retries = 2
+
+[rules.resources]
+threads = 2
+memory = "8G"
+time_limit = "4h"
+
+[rules.environment]
+docker = "quay.io/biocontainers/mulled-v2-5f89fe0cd045cb1d615630b9261a1d17943a9b6a:6a9ff0e76ec016c3d0d27e0c0d362339f2d787e6-0"
+
+# ---------------------------------------------------------------------------
+# dbGaP branch (upstream --dbgap_key, download_method = 'sratools' +
+# dbgap_key set)
+#
+# Controlled-access SRA data needs an NIH dbGaP authorized-access
+# certificate (.ngc or .jwt file) supplied by the USER at runtime — the
+# port itself needs no credentials and the public sratools branch is
+# unchanged. When dbgap_key is set, these two rules take over from
+# sra_prefetch / sra_fastq_sratools (which are gated off in that case) and
+# pass the certificate through verbatim exactly like upstream: prefetch
+# `--ngc`/`--perm` (SRATOOLS_PREFETCH shell logic) and
+# fasterq-dump `--ngc`/`--perm` (SRATOOLS_FASTERQDUMP script logic).
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "sra_prefetch_dbgap"
+description = "Prefetch SRA records with a dbGaP authorized-access certificate and validate them with vdb-validate"
+input = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
+output = []
+when = '!config.skip_fastq_download && config.download_method == "sratools" && config.dbgap_key != ""'
+shell = "bash scripts/sra_prefetch_runs.sh \"{input}\" \"{config.out_dir}/sra/{sample}\" \"{config.dbgap_key}\""
+retries = 2
+
+[rules.resources]
+threads = 1
+memory = "2G"
+time_limit = "4h"
+
+[rules.environment]
+docker = "quay.io/biocontainers/sra-tools:3.0.8--h9f5acd7_0"
+
+[[rules]]
+name = "sra_fastq_sratools_dbgap"
+description = "Convert prefetched SRA records to compressed FastQ with fasterq-dump and pigz, using a dbGaP authorized-access certificate"
+input = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
+output = []
+depends_on = ["sra_prefetch_dbgap"]
+when = '!config.skip_fastq_download && config.download_method == "sratools" && config.dbgap_key != ""'
+shell = "bash scripts/sra_fastq_sratools_runs.sh \"{input}\" \"{config.out_dir}/sra/{sample}\" \"{config.out_dir}/fastq\" \"{config.dbgap_key}\""
 retries = 2
 
 [rules.resources]
@@ -454,10 +575,20 @@ output = [
     "{config.out_dir}/samplesheet/{sample}.samplesheet.csv",
     "{config.out_dir}/samplesheet/{sample}.mappings.csv",
 ]
-# Exactly one of the three download branches is active per run
-# (download_method); the others are skipped and skipped rules satisfy
-# dependencies, so listing all three is safe.
-depends_on = ["sra_fastq_ftp", "sra_fastq_sratools", "sra_fastq_aspera"]
+# Exactly one of the download branch sets is active per run (download_method
+# + sra_tools_fallback/dbgap_key); the others are skipped and skipped rules
+# satisfy dependencies, so listing all of them is safe. The samplesheet must
+# wait for every branch: whichever one runs produces the fastq files the
+# sheet references (all branches use the same file naming).
+depends_on = [
+    "sra_fastq_ftp",
+    "sra_fastq_sratools",
+    "sra_fastq_aspera",
+    "sra_prefetch_fallback",
+    "sra_fastq_sratools_fallback",
+    "sra_prefetch_dbgap",
+    "sra_fastq_sratools_dbgap",
+]
 when = "!config.skip_fastq_download"
 shell = "python scripts/sra_to_samplesheet.py \"{input}\" \"{output[0]}\" \"{output[1]}\" \"{config.out_dir}\" \"{config.nf_core_pipeline}\" \"{config.nf_core_rnaseq_strandedness}\" \"{config.sample_mapping_fields}\""
 localrule = true
