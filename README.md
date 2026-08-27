@@ -92,8 +92,34 @@ FTP / sra-tools branches; off by default so the default plan is unchanged —
 see the fidelity table), `dbgap_key` (path to a `.ngc`/`.jwt` dbGaP
 authorized-access certificate for the sratools branch; empty = public data
 only), `nf_core_pipeline` (tailor the samplesheet for rnaseq/atacseq/
-taxprofiler) and `sample_mapping_fields` (drives the MultiQC mappings
-config).
+taxprofiler), `sample_mapping_fields` (drives the MultiQC mappings
+config) and the completion-notification keys `email` / `email_on_fail` /
+`hook_url` (see below).
+
+### Completion notifications
+
+The upstream `PIPELINE_COMPLETION` (nf-core `workflow.onComplete`) is ported
+onto the engine's workflow-level terminal hooks `[workflow] on_complete` /
+`on_error` (engine >= 0.17.0 to fire; unknown `[workflow]` keys are ignored
+by older engines, so they no-op there and the default plan is unchanged).
+All three keys default empty (upstream's null params) — the hooks are no-ops
+unless configured:
+
+- `email` — address the run-summary mail is sent to after a run without
+  failed rules (`sendmail -t` if available, else `mail`; if neither exists
+  the hook only warns — notifications never change the run status)
+- `email_on_fail` — address mailed after a failed run; falls back to
+  `email` when empty (nf-core behavior)
+- `hook_url` — webhook URL receiving a JSON notification with the run
+  counters (`curl` POST, Slack- and Teams-compatible `{"text": ...}`
+  payload) on completion and failure alike
+
+The hooks run `scripts/pipeline_completion.sh` in the workflow root; the
+mail subject/body mirror the upstream summary (status + `{succeeded}` /
+`{failed}` / `{skipped}` counters + `results/` path). Upstream's
+`sraCurateSamplesheetWarn` end-of-run log note has no hook: the
+auto-created samplesheet should be curated manually (see the Known
+limitations paragraph below).
 
 ## Source
 
@@ -119,7 +145,7 @@ that the default path touches.
 | `collectFile('id_mappings.csv')` | `combine_mappings` | system (bash + coreutils) | Same gather semantics; `results/samplesheet/id_mappings.csv`. |
 | MULTIQC_MAPPINGS_CONFIG | `multiqc_mappings_config` | python 3.9.5 | `multiqc_mappings_config.py` verbatim; output `results/samplesheet/multiqc_config.yml` (upstream publishDir). Gated on `sample_mapping_fields` being set — on by default, same as upstream. |
 | softwareVersionsToYAML + `versions.yml` | not ported | — | nf-core boilerplate: every upstream process emits a per-process `versions.yml`, and the SRA workflow collects them into `pipeline_info/nf_core_fetchngs_software_mqc_versions.yml`. A faithful port would require every rule to emit a `versions.yml`, which would change every rule's command (the default plan is byte-identical) — and the collected file has no consumer in fetchngs itself (no MultiQC process; the mappings config targets downstream pipelines). Structural exclusion. |
-| PIPELINE_COMPLETION (emails, summary, hooks) | not ported | — | nf-core boilerplate: `workflow.onComplete` → `completionEmail` (sendmail), `completionSummary` (stdout), `imNotification` (`hook_url` webhook), `sraCurateSamplesheetWarn` (log warning). Workflow-level completion hooks; oxo-flow has no email/webhook completion mechanism. Structural exclusion. |
+| PIPELINE_COMPLETION (`workflow.onComplete`: completionEmail / completionSummary / imNotification / sraCurateSamplesheetWarn) | `[workflow] on_complete` + `on_error` hooks (`scripts/pipeline_completion.sh`) | sendmail / mail / curl (host tools) | Ported onto the engine's workflow-level terminal hooks (engine >= 0.17.0): `email` mails the run-summary on completion, `email_on_fail` after a failed run (falling back to `email`, like upstream), `hook_url` POSTs a JSON notification with the run counters on both (upstream `imNotification` posts an Adaptive-Card/Slack JSON; here the payload is a `{"text": ...}` summary). All three default empty (upstream's null params), so the hooks no-op; older engines ignore the `[workflow]` keys entirely, keeping the default plan unchanged. `completionSummary`'s stdout line is covered by the engine's own "Done: N succeeded..." line, and `sraCurateSamplesheetWarn` is a static log note (see Known limitations). Hooks are best-effort: a missing mail tool or failing webhook only warns and never changes the run status. |
 | CUSTOM_SRATOOLSNCBISETTINGS + SRATOOLS_PREFETCH | `sra_prefetch` | sra-tools 3.0.8 (`quay.io/biocontainers/sra-tools:3.0.8--h9f5acd7_0`) | When-gated branch, off by default (`download_method = "sratools"` + `dbgap_key` empty): per-run `prefetch` under the upstream `retry_with_backoff` policy (5 attempts / 1 s base / 100 s max, `scripts/retry_with_backoff.sh` verbatim) + `vdb-validate` incl. the `.sralite` variant; fresh NCBI settings file per id (upstream CUSTOM_SRATOOLSNCBISETTINGS GUID config). SRA records land in `results/sra/<id>/` (upstream publishDir `results/sra`, `enabled: false` — intermediates). Applies to **all** runs, matching upstream's explicit `--download_method sratools` mode; with `dbgap_key` set, the dbGaP variant below takes over. |
 | SRATOOLS_FASTERQDUMP | `sra_fastq_sratools` | sra-tools 2.11.0 + pigz 2.6 (`quay.io/biocontainers/mulled-v2-5f89fe0cd045cb1d615630b9261a1d17943a9b6a:6a9ff0e76ec016c3d0d27e0c0d362339f2d787e6-0`, fetchngs' patched image) | When-gated on `download_method = "sratools"` (+ `dbgap_key` empty); depends on `sra_prefetch`. `fasterq-dump --split-files --include-technical --threads` + `pigz --no-name --processes` translated from the fetchngs module (env pinned to upstream environment.yml: sra-tools 2.11.0 + pigz 2.6); files land in `results/fastq/` with the same names as the FTP branch so the samplesheet is method-agnostic. |
 | Per-run sratools fallback (upstream SRA workflow `branch`, runs without FTP/fasp links with `download_method = "ftp"` or `"aspera"`) | `sra_prefetch_fallback` + `sra_fastq_sratools_fallback` | sra-tools 3.0.8 / 2.11.0 + pigz 2.6 (same images as above) | When-gated on `sra_tools_fallback = true` + `download_method = "ftp"` or `"aspera"` (off by default — the default plan is unchanged). Mirrors the sratools-method rules but processes only the runs upstream's `branch` sends to sra-tools: rows whose metadata has neither `fastq_1` nor `fastq_aspera` (branch condition `!meta.fastq_aspera && !meta.fastq_1`, re-derived from the runinfo tsv by `scripts/sra_prefetch_runs.sh` / `scripts/sra_fastq_sratools_runs.sh`). Prefetch + `vdb-validate` incl. the `.sralite` variant, then fasterq-dump + pigz into `results/fastq/` with the FTP-branch naming so the samplesheet is method-agnostic; the FTP rule keeps downloading the runs that do have links. |
@@ -144,9 +170,12 @@ and `dbgap_key` enables the dbGaP certificate path of the sratools branch
 credentials). Remaining deviation: with `ftp` or `aspera` and the fallback
 off, runs whose metadata lacks the matching download links are skipped with
 a warning (upstream would route them per run; enable `sra_tools_fallback` to
-restore the triage). The nf-core boilerplate
-(`versions.yml` collection, PIPELINE_COMPLETION emails/summary/hooks) is not
-ported (see table).
+restore the triage). The auto-created samplesheet should be double-checked
+before downstream use (the upstream `sraCurateSamplesheetWarn` end-of-run
+note): public databases don't reliably hold information such as strandedness
+or controls, and all sample metadata from the ENA is appended as additional
+columns to help manual curation. The nf-core boilerplate (`versions.yml`
+collection) is not ported (see table).
 
 ## Test
 

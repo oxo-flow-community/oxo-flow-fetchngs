@@ -19,4 +19,7 @@ grep -q "would execute" /tmp/oxo-dryrun-$$.txt
 echo "==> debug: expanded commands contain no literal {wildcards}"
 "$OXO" debug main.oxoflow | grep -q '{sample}' && { echo "unexpanded wildcards in debug output"; exit 1; } || true
 
+echo "==> completion hooks (PIPELINE_COMPLETION port): empty config = no-op, exit 0"
+bash scripts/pipeline_completion.sh completed "" "" "" 1 0 0 results
+
 echo "PASS"

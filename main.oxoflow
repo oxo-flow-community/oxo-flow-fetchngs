@@ -21,14 +21,28 @@
 #   - dbGaP (--dbgap_key) -> sra_prefetch_dbgap + sra_fastq_sratools_dbgap,
 #     gated on dbgap_key being set; the certificate is passed through
 #     verbatim (--ngc/--perm), the port itself needs no credentials
-# The nf-core boilerplate (versions.yml collection, PIPELINE_COMPLETION
-# emails/summary/hooks) stays excluded — see the fidelity table in README.md.
+# The nf-core boilerplate (versions.yml collection) stays excluded — see the
+# fidelity table in README.md. PIPELINE_COMPLETION (completion email, failure
+# email, webhook notification) is ported onto the workflow-level terminal
+# hooks below (engine >= 0.17.0; unknown [workflow] keys on older engines are
+# ignored, so the released-engine default plan is unchanged).
+# The hooks are best-effort and no-op by default: they fire only when
+# [config] email / email_on_fail / hook_url are set (see below).
 
 [workflow]
 name = "fetchngs"
 version = "1.12.0"
 description = "Fetch metadata and raw FastQ files from public databases (SRA/ENA/DDBJ/GEO) - oxo-flow port of nf-core/fetchngs"
 author = "oxo-flow-community"
+# nf-core PIPELINE_COMPLETION (workflow.onComplete) -> engine terminal hooks:
+# on_complete fires once after a run with no failed rules, on_error after a
+# run with at least one failure (including --keep-going runs). Both render
+# {config.*} and the {succeeded}/{failed}/{skipped} counters, run in the
+# workflow root with the workflow shell_prelude, and never change the run
+# status (best-effort). scripts/pipeline_completion.sh does the guarded
+# sendmail/mail + curl work and always exits 0.
+on_complete = 'bash scripts/pipeline_completion.sh completed "{config.email}" "{config.email_on_fail}" "{config.hook_url}" {succeeded} {failed} {skipped} {config.out_dir}'
+on_error = 'bash scripts/pipeline_completion.sh failed "{config.email}" "{config.email_on_fail}" "{config.hook_url}" {succeeded} {failed} {skipped} {config.out_dir}'
 
 [config]
 # File containing SRA/ENA/GEO/DDBJ identifiers, one per line (upstream --input).
@@ -66,6 +80,24 @@ dbgap_key = ""
 nf_core_pipeline = ""
 nf_core_rnaseq_strandedness = "auto"
 sample_mapping_fields = "experiment_accession,run_accession,sample_accession,experiment_alias,run_alias,sample_alias,experiment_title,sample_title,sample_description"
+# Completion notifications (upstream PIPELINE_COMPLETION, --email /
+# --email_on_fail / --hook_url; upstream defaults are null, here ""):
+#   - email          address the completion summary is mailed to (sendmail/mail
+#                    on the host) after a run without failed rules
+#   - email_on_fail  address mailed after a failed run; falls back to `email`
+#                    when empty (nf-core sends the failure mail to email_on_fail,
+#                    or to email when only that is set)
+#   - hook_url       webhook URL receiving a JSON notification (curl POST) with
+#                    the run counters, on completion and failure alike
+# These drive the [workflow] on_complete / on_error hooks above (engine >=
+# 0.17.0). With all three empty (the default) both hooks are no-ops, matching
+# upstream's null params; older engines ignore the [workflow] keys entirely.
+# sraCurateSamplesheetWarn (the upstream end-of-run "double-check the
+# samplesheet" log note) has no hook: the auto-created samplesheet curation
+# caveat is documented in README.md instead.
+email = ""
+email_on_fail = ""
+hook_url = ""
 
 # One sample source for the default path (playbook §2.4): the database ids.
 [[sample_groups]]
