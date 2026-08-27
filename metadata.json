@@ -31,6 +31,7 @@
     "sra_prefetch",
     "sra_fastq_sratools",
     "sra_fastq_aspera",
+    "sra_fastq_ftp_aspera_fallback",
     "sra_prefetch_fallback",
     "sra_fastq_sratools_fallback",
     "sra_prefetch_dbgap",
@@ -41,10 +42,9 @@
     "multiqc_mappings_config"
   ],
   "excluded": [
-    "softwareVersionsToYAML + versions.yml, PIPELINE_COMPLETION (emails/summary/hooks) — nf-core boilerplate: a faithful versions.yml port needs every rule to emit a per-process versions.yml (would change every rule command; the default plan is byte-identical) and the collected file has no consumer in fetchngs itself; PIPELINE_COMPLETION is workflow-level completion hooks (sendmail/webhook) that oxo-flow has no mechanism for",
-    "per-run row triage that requires different containers per row: with download_method=aspera, runs that have an FTP link but no fasp link go to the FTP branch upstream (no per-row container switch in oxo-flow); the equivalent sratools triage IS ported as a when-gated branch (sra_tools_fallback) and dbGaP certificate pass-through IS ported (dbgap_key)"
+    "softwareVersionsToYAML + versions.yml, PIPELINE_COMPLETION (emails/summary/hooks) — nf-core boilerplate: a faithful versions.yml port needs every rule to emit a per-process versions.yml (would change every rule command; the default plan is byte-identical) and the collected file has no consumer in fetchngs itself; PIPELINE_COMPLETION is workflow-level completion hooks (sendmail/webhook) that oxo-flow has no mechanism for"
   ],
-  "rule_count": 15,
+  "rule_count": 16,
   "tools": [
     "python",
     "wget",
@@ -61,7 +61,7 @@
       "ids file: one SRA/ENA/DDBJ/GEO accession per line (config.input, default test/fixtures/ids.txt), kept in sync with the [[sample_groups]] sample source",
       "reference data: none — the workflow downloads data from public archives; no genome FASTA, annotation or indices required",
       "network: outbound access to ENA over FTP (wget -t 5 -c -T 60, 2 retries); the sratools branch needs NCBI SRA outbound access (prefetch/fasterq-dump), the aspera branch ENA fasp on port 33001",
-      "compute: up to 2 CPUs / 12 GB per rule (FastQ download 2 threads/12G; metadata fetch 1 thread/6G; 4 h time limits on five rules)",
+      "compute: up to 2 CPUs / 12 GB per rule (FastQ download 2 threads/12G; metadata fetch 1 thread/6G; 4 h time limits on twelve rules)",
       "disk: results/fastq/ grows with downloaded FastQ files plus md5/ checksums (depends on input size); metadata/ and samplesheet/ stay small"
     ]
   },

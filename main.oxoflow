@@ -10,10 +10,14 @@
 #   - 'sratools'  -> sra_prefetch + sra_fastq_sratools (prefetch/fasterq-dump
 #                    incl. the .sralite variant, sra-tools 3.0.8 / 2.11.0)
 #   - 'aspera'    -> sra_fastq_aspera (Aspera CLI 4.14.0, ENA fasp links)
-#   - per-run sratools fallback (upstream `branch` triage: with
-#     download_method = 'ftp', runs without FTP/fasp links go to
-#     prefetch/fasterq-dump) -> sra_prefetch_fallback +
-#     sra_fastq_sratools_fallback, gated on sra_tools_fallback = true
+#   - per-run fallback (upstream `branch` triage, gated on
+#     sra_tools_fallback = true): with download_method = 'ftp', runs without
+#     FTP/fasp links go to prefetch/fasterq-dump -> sra_prefetch_fallback +
+#     sra_fastq_sratools_fallback; with download_method = 'aspera', runs
+#     without a fasp link go to the FTP branch when they have an FTP link
+#     (sra_fastq_ftp_aspera_fallback) and to prefetch/fasterq-dump
+#     otherwise (the same fallback rules — their when-gates cover both
+#     methods)
 #   - dbGaP (--dbgap_key) -> sra_prefetch_dbgap + sra_fastq_sratools_dbgap,
 #     gated on dbgap_key being set; the certificate is passed through
 #     verbatim (--ngc/--perm), the port itself needs no credentials
@@ -40,12 +44,18 @@ ena_metadata_fields = ""
 # plan is unchanged when the other branches are off.
 download_method = "ftp"
 skip_fastq_download = false
-# Per-run sra-tools fallback (upstream SRA workflow `branch`): with
-# download_method = 'ftp', runs whose ENA metadata has NEITHER an FTP link
-# (fastq_1) NOR a fasp link (fastq_aspera) are routed to prefetch +
-# fasterq-dump at runtime. Ported as a when-gated branch, off by default so
-# the default 'ftp' plan stays byte-identical; enable to match upstream's
-# default per-run triage.
+# Per-run fallback (upstream SRA workflow `branch`), off by default so the
+# default 'ftp' plan stays byte-identical; enable to match upstream's
+# per-run triage for both methods:
+#   - download_method = 'ftp': runs whose ENA metadata has NEITHER an FTP
+#     link (fastq_1) NOR a fasp link (fastq_aspera) are routed to prefetch
+#     + fasterq-dump at runtime (sra_prefetch_fallback +
+#     sra_fastq_sratools_fallback);
+#   - download_method = 'aspera': runs without a fasp link are routed to
+#     the FTP branch when they have an FTP link (fastq_1,
+#     sra_fastq_ftp_aspera_fallback) and to prefetch + fasterq-dump
+#     otherwise (the same fallback rules).
+# Without it, such runs are skipped with a warning.
 sra_tools_fallback = false
 # dbGaP authorized-access certificate for the sratools branch (upstream
 # --dbgap_key): path to a .ngc or .jwt file. Empty = public data only — the
@@ -177,7 +187,7 @@ tail -n +2 "$tsv" | while read -r line; do
     fq1=$(printf '%s' "$line" | cut -f "$c_fq1")
     md51=$(printf '%s' "$line" | cut -f "$c_md51")
     if [ -z "$fq1" ]; then
-        echo "WARNING: no FTP link for ${run_id}; upstream would route this run to the per-run sra-tools fallback (not expressible in oxo-flow), skipping" >&2
+        echo "WARNING: no FTP link for ${run_id}; handled by the per-run sra-tools fallback (sra_prefetch_fallback) when sra_tools_fallback = true, skipping here" >&2
         continue
     fi
     # Download only when the file is absent or fails its md5 (idempotent
@@ -386,25 +396,26 @@ docker = "quay.io/biocontainers/mulled-v2-5f89fe0cd045cb1d615630b9261a1d17943a9b
 
 # ---------------------------------------------------------------------------
 # Per-run sra-tools fallback (upstream SRA workflow `branch`, download_method
-# = 'ftp' + sra_tools_fallback = true)
+# = 'ftp' / 'aspera' + sra_tools_fallback = true)
 #
-# Upstream triages each run at runtime: with download_method = 'ftp', runs
-# whose metadata has NEITHER an FTP link (fastq_1) NOR a fasp link
-# (fastq_aspera) are sent to prefetch + fasterq-dump per run (branch
-# condition `!meta.fastq_aspera && !meta.fastq_1`). oxo-flow cannot branch
-# per row, so the triage is ported as a when-gated branch off by default:
+# Upstream triages each run at runtime: runs whose metadata has NEITHER an
+# FTP link (fastq_1) NOR a fasp link (fastq_aspera) are sent to prefetch +
+# fasterq-dump per run (branch condition `!meta.fastq_aspera && !meta.fastq_1`)
+# — for download_method = 'ftp' AND 'aspera' alike. oxo-flow cannot branch
+# per row, so the triage is ported as when-gated branches off by default:
 # when enabled, these two rules prefetch exactly that subset (the shared
 # scripts re-derive it from the runinfo tsv) and the FTP rule keeps
-# downloading the runs that do have links. Same no-outputs convention as the
-# sratools-method branch: intermediates land in results/sra/{sample}/, the
-# produced fastq set is data-dependent.
+# downloading the runs that do have links; under 'aspera' the FTP-link-but-
+# no-fasp subset is downloaded by sra_fastq_ftp_aspera_fallback. Same
+# no-outputs convention as the sratools-method branch: intermediates land in
+# results/sra/{sample}/, the produced fastq set is data-dependent.
 # ---------------------------------------------------------------------------
 [[rules]]
 name = "sra_prefetch_fallback"
 description = "Prefetch SRA records for runs without FTP/fasp links (upstream per-run sratools fallback) and validate them with vdb-validate"
 input = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
 output = []
-when = '!config.skip_fastq_download && config.download_method == "ftp" && config.sra_tools_fallback'
+when = '!config.skip_fastq_download && (config.download_method == "ftp" || config.download_method == "aspera") && config.sra_tools_fallback'
 shell = "bash scripts/sra_prefetch_runs.sh --fallback \"{input}\" \"{config.out_dir}/sra/{sample}\""
 retries = 2
 
@@ -422,7 +433,7 @@ description = "Convert prefetched SRA records of fallback runs to compressed Fas
 input = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
 output = []
 depends_on = ["sra_prefetch_fallback"]
-when = '!config.skip_fastq_download && config.download_method == "ftp" && config.sra_tools_fallback'
+when = '!config.skip_fastq_download && (config.download_method == "ftp" || config.download_method == "aspera") && config.sra_tools_fallback'
 shell = "bash scripts/sra_fastq_sratools_runs.sh --fallback \"{input}\" \"{config.out_dir}/sra/{sample}\" \"{config.out_dir}/fastq\""
 retries = 2
 
@@ -489,9 +500,11 @@ docker = "quay.io/biocontainers/mulled-v2-5f89fe0cd045cb1d615630b9261a1d17943a9b
 # biocontainer (anonymous `era-fasp` user + pre-installed bypass key — no
 # credentials; the image is the same upstream uses). ascp flags
 # `-QT -l 300m -P33001` from the upstream module config. Upstream also sends
-# runs without fasp links to the ftp / sra-tools branches per run; oxo-flow
-# cannot branch per-row, so such runs are skipped with a warning (deviation,
-# see README).
+# runs without fasp links to the ftp / sra-tools branches per run; that
+# triage is ported as when-gated branches (sra_fastq_ftp_aspera_fallback +
+# sra_prefetch_fallback / sra_fastq_sratools_fallback, all on
+# sra_tools_fallback = true); without it, such runs are skipped with a
+# warning (deviation, see README).
 # ---------------------------------------------------------------------------
 [[rules]]
 name = "sra_fastq_aspera"
@@ -524,7 +537,7 @@ tail -n +2 "$tsv" | while read -r line; do
     fasp=$(printf '%s' "$line" | cut -f "$c_fasp")
     md51=$(printf '%s' "$line" | cut -f "$c_md51")
     if [ -z "$fasp" ]; then
-        echo "WARNING: no fasp link for ${run_id}; upstream would fall back to the ftp/sra-tools branches, skipping" >&2
+        echo "WARNING: no fasp link for ${run_id}; upstream routes this run to the ftp/sra-tools branches per run — ported as sra_fastq_ftp_aspera_fallback + sra_prefetch_fallback when sra_tools_fallback = true, skipping here" >&2
         continue
     fi
     # Download only when the file is absent or fails its md5 (idempotent
@@ -565,6 +578,39 @@ time_limit = "4h"
 docker = "quay.io/biocontainers/aspera-cli:4.14.0--hdfd78af_1"
 
 # ---------------------------------------------------------------------------
+# Per-run FTP fallback for the aspera method (upstream SRA workflow
+# `branch`, download_method = 'aspera' + sra_tools_fallback = true)
+#
+# Upstream triages each run at runtime regardless of the download method:
+# with download_method = 'aspera', runs that have an FTP link (fastq_1) but
+# no fasp link (fastq_aspera) are sent to the FTP process per run (branch
+# condition `meta.fastq_1 && !meta.fastq_aspera`). Ported as a when-gated
+# branch (same toggle as the sra-tools fallback), off by default so the
+# default plan is unchanged: when enabled, the shared script partitions the
+# runinfo tsv with the aspera and sra-tools rules — every run is downloaded
+# exactly once, by whichever branch upstream's `branch` would pick. Same
+# no-outputs convention as sra_fastq_ftp / sra_fastq_aspera: the produced
+# file set is data-dependent; the md5sum verification inside the command is
+# the correctness gate.
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "sra_fastq_ftp_aspera_fallback"
+description = "Download via FTP the runs without a fasp link (upstream per-run ftp fallback under download_method = 'aspera') and verify ENA md5 sums"
+input = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
+output = []
+when = '!config.skip_fastq_download && config.download_method == "aspera" && config.sra_tools_fallback'
+shell = "bash scripts/sra_fastq_ftp_aspera_runs.sh \"{input}\" \"{config.out_dir}\""
+retries = 2
+
+[rules.resources]
+threads = 2
+memory = "12G"
+time_limit = "4h"
+
+[rules.environment]
+docker = "quay.io/biocontainers/wget:1.20.1"
+
+# ---------------------------------------------------------------------------
 # Auto-create samplesheet + id mappings (upstream SRA_TO_SAMPLESHEET)
 # ---------------------------------------------------------------------------
 [[rules]]
@@ -584,6 +630,7 @@ depends_on = [
     "sra_fastq_ftp",
     "sra_fastq_sratools",
     "sra_fastq_aspera",
+    "sra_fastq_ftp_aspera_fallback",
     "sra_prefetch_fallback",
     "sra_fastq_sratools_fallback",
     "sra_prefetch_dbgap",
