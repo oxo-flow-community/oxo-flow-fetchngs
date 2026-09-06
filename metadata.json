@@ -66,5 +66,8 @@
   },
   "repo_url": "https://github.com/oxo-flow-community/oxo-flow-fetchngs",
   "license": "Apache-2.0",
-  "upstream_license": "MIT"
+  "upstream_license": "MIT",
+  "not_applicable": [
+    "nf-core/untar module is present in the upstream tree but unreachable: no workflow/subworkflow includes it (only modules.json dependency listing + an unrelated sratools test tag)"
+  ]
 }
