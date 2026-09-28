@@ -44,7 +44,22 @@ def main():
         sys.exit("No run rows found in {}".format(tsv_in))
 
     fields = [f.strip().lower() for f in mapping_fields.split(",")] if mapping_fields else []
-    keys = ["sample", "fastq_1", "fastq_2"] + [k for k in header if k not in REMOVED]
+
+    # nf-core pipeline specific entries (default: none). Upstream inserts
+    # these into `pipeline_map` BEFORE `pipeline_map << meta_clone`, so its
+    # rendered header (`pipeline_map.keySet()`) carries them. Precompute the
+    # same key set here so the samplesheet header, the validation set and the
+    # per-row renders all stay in lockstep.
+    pipeline_specific = {
+        "rnaseq": "strandedness",
+        "atacseq": "replicate",
+        "taxprofiler": "fasta",
+    }
+    extra_key = pipeline_specific.get(pipeline)
+    keys = ["sample", "fastq_1", "fastq_2"]
+    if extra_key:
+        keys.append(extra_key)
+    keys += [k for k in header if k not in REMOVED]
 
     # Upstream check: `(mappings_map.keySet() + fields).unique().size() != mappings_map.keySet().size()`
     if len(set(keys + fields)) != len(set(keys)):
@@ -75,13 +90,12 @@ def main():
         }
 
         # nf-core pipeline specific entries (default: none)
-        if pipeline:
-            if pipeline == "rnaseq":
-                pipeline_map["strandedness"] = strandedness
-            elif pipeline == "atacseq":
-                pipeline_map["replicate"] = 1
-            elif pipeline == "taxprofiler":
-                pipeline_map["fasta"] = ""
+        if pipeline == "rnaseq":
+            pipeline_map["strandedness"] = strandedness
+        elif pipeline == "atacseq":
+            pipeline_map["replicate"] = 1
+        elif pipeline == "taxprofiler":
+            pipeline_map["fasta"] = ""
 
         for key in header:
             if key not in REMOVED:
