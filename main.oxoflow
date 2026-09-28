@@ -75,7 +75,9 @@ sra_tools_fallback = false
 # --dbgap_key): path to a .ngc or .jwt file. Empty = public data only — the
 # public sratools branch works without it; when set, the certificate is
 # passed through verbatim (prefetch/fasterq-dump --ngc or --perm).
-dbgap_key = ""
+# Declared sensitive so the value is env-routed and never lands in plaintext
+# in command records, logs, or the checkpoint (lint W032).
+dbgap_key = { default = "", sensitive = true }
 # nf-core pipeline to tailor the samplesheet for (rnaseq/atacseq/taxprofiler); empty = none.
 nf_core_pipeline = ""
 nf_core_rnaseq_strandedness = "auto"
