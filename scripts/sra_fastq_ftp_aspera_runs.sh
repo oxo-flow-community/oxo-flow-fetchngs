@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Shared per-run FTP download loop for the when-gated branches of the
-# oxo-flow-fetchngs port (upstream SRA_FASTQ_FTP):
+# oxo-flow-fetchngs port (upstream SRA_FASTQ_FTP, 1.13.0: wget 1.25.0 with the
+# PR 325 wait flags `-t 5 -nv -w 5 --random-wait -c -T 60`, Seqera Wave image):
 #   - sra_fastq_ftp_aspera_fallback  (download_method = 'aspera', sra_tools_fallback)
 # The default-config rule (sra_fastq_ftp in main.oxoflow) carries the same
 # logic inline: its rendered command is frozen by the byte-identical dry-run
@@ -62,7 +63,7 @@ tail -n +2 "$tsv" | while read -r line; do
         if [ -f "$out" ] && printf '%s  %s\n' "$expected" "$base" | (cd "$fastq_dir" && md5sum -c - > /dev/null 2>&1); then
             return 0
         fi
-        wget -t 5 -nv -c -T 60 -O "$out" "$url" || exit 1
+        wget -t 5 -nv -w 5 --random-wait -c -T 60 -O "$out" "$url" || exit 1
         printf '%s  %s\n' "$expected" "$base" > "$md5_dir/${base}.md5"
         (cd "$fastq_dir" && md5sum -c "md5/${base}.md5") || exit 1
     }

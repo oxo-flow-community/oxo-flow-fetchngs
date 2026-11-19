@@ -23,6 +23,9 @@ echo "==> debug: expanded commands contain no literal {wildcards}"
 "$OXO" debug main.oxoflow | grep -q '{sample}' && { echo "unexpanded wildcards in debug output"; exit 1; } || true
 
 echo "==> completion hooks (PIPELINE_COMPLETION port): empty config = no-op, exit 0"
-bash scripts/pipeline_completion.sh completed "" "" "" 1 0 0 results
+# 7-arg contract (1.13.0): <status> <email> <email_on_fail> <succeeded>
+# <failed> <skipped> <out_dir> — the 1.12.0 hook_url slot was removed with
+# the upstream webhook feature.
+bash scripts/pipeline_completion.sh completed "" "" 1 0 0 results
 
 echo "PASS"

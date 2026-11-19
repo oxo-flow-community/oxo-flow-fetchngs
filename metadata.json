@@ -7,12 +7,12 @@
   "source": {
     "repo": "nf-core/fetchngs",
     "url": "https://github.com/nf-core/fetchngs",
-    "tag": "1.12.0",
-    "sha": "8ec2d934f9301c818d961b1e4fdf7fc79610bdc5",
+    "tag": "1.13.0",
+    "sha": "955c892d80927cee633765e6e390f9cc6b7235c9",
     "license": "MIT"
   },
   "created": "2026-08-15",
-  "updated": "2026-09-04",
+  "updated": "2026-11-19",
   "domain": "genomics",
   "tags": [
     "sra",
@@ -31,6 +31,7 @@
     "sra_fastq_ftp",
     "sra_prefetch",
     "sra_fastq_sratools",
+    "sra_fastq_fastqdl",
     "sra_fastq_aspera",
     "sra_fastq_ftp_aspera_fallback",
     "sra_prefetch_fallback",
@@ -43,31 +44,34 @@
     "multiqc_mappings_config"
   ],
   "excluded": [],
-  "rule_count": 16,
+  "rule_count": 17,
   "tools": [
     "python",
     "wget",
     "coreutils",
+    "curl",
     "sra-tools",
     "pigz",
+    "fastq-dl",
     "aspera-cli"
   ],
   "description": "Fetch metadata and raw FastQ files from public sequence databases (SRA/ENA/DDBJ/GEO). Given a list of database identifiers — run accessions (SRR/ERR/DRR), experiments, studies, biosamples or GEO series — the pipeline retrieves the ENA run metadata, downloads the FastQ files over FTP, validates every download against its ENA md5 sum, and auto-creates a samplesheet plus sample id-mappings and a MultiQC mappings config, ready for downstream nf-core pipelines such as rnaseq, atacseq or taxprofiler.",
   "installation": {
     "engine": "oxo-flow >= 0.17.0",
-    "toolchain": "containers (Docker) — pinned images (quay.io/biocontainers, identical to upstream)",
+    "toolchain": "containers (Docker) — pinned images (quay.io/biocontainers and community.wave.seqera.io, identical to upstream)",
     "requirements": [
       "ids file: one SRA/ENA/DDBJ/GEO accession per line (config.input, default test/fixtures/ids.txt), kept in sync with the [[sample_groups]] sample source",
       "reference data: none — the workflow downloads data from public archives; no genome FASTA, annotation or indices required",
-      "network: outbound access to ENA over FTP (wget -t 5 -c -T 60, 2 retries); the sratools branch needs NCBI SRA outbound access (prefetch/fasterq-dump), the aspera branch ENA fasp on port 33001",
-      "compute: up to 2 CPUs / 12 GB per rule (FastQ download 2 threads/12G; metadata fetch 1 thread/6G; 4 h time limits on twelve rules)",
-      "disk: results/fastq/ grows with downloaded FastQ files plus md5/ checksums (depends on input size); metadata/ and samplesheet/ stay small"
+      "network: outbound access to ENA over FTP (wget -t 5 -nv -w 5 --random-wait -c -T 60, 2 retries); the sratools branch needs NCBI SRA outbound access (prefetch/fasterq-dump) plus the NCBI locate endpoint (locate.ncbi.nlm.nih.gov) for md5 verification of checksum-less prefetch archives; the aspera branch needs ENA fasp on port 33001 and outbound internet at runtime (the 4.20.0 image downloads the ascp client via `ascli conf ascp install`); the fastq-dl branch queries ENA and downloads from ENA's own mirrors",
+      "compute: up to 2 CPUs / 12 GB per rule (FastQ download 2 threads/12G; metadata fetch 1 thread/6G; 4 h time limits on thirteen rules)",
+      "disk: results/fastq/ grows with downloaded FastQ files plus md5/ checksums (depends on input size); metadata/ holds the runinfo tables and, for the fastq-dl branch, the per-run *-run-info.tsv / *-run-mergers.tsv; samplesheet/ stays small"
     ]
   },
   "repo_url": "https://github.com/oxo-flow-community/oxo-flow-fetchngs",
   "license": "Apache-2.0",
   "upstream_license": "MIT",
   "not_applicable": [
-    "nf-core/untar module is present in the upstream tree but unreachable: no workflow/subworkflow includes it (only modules.json dependency listing + an unrelated sratools test tag)"
+    "nf-core/untar module: already unreachable in 1.12.0 (no workflow/subworkflow included it) and removed from the upstream tree entirely in 1.13.0; the port never carried a rule for it",
+    "adaptivecard/slackreport webhook assets + hook_url/imNotification: removed by upstream in 1.13.0, so there is nothing to port (see the README fidelity table)"
   ]
 }

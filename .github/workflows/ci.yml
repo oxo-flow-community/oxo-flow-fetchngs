@@ -11,10 +11,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install oxo-flow (latest release tarball)
+      - name: Install oxo-flow (pinned release tarball)
+        # Determinism: pin the engine instead of floating releases/latest.
+        # v0.31.0 is the release this workflow's gates (validate / lint /
+        # dry-run / debug + the completion-hook check) are demonstrated green
+        # on (local runs with the release binary + this PR's CI). Do not
+        # float again casually: a floating engine silently re-bases what
+        # "green" means. If a future engine release rejects this workflow,
+        # pin the last release with green CI on this repo (v0.20.1 is the
+        # pre-0.31 release the main branch last passed on) instead of
+        # weakening test/run.sh.
         run: |
           curl -fL -o oxo-flow.tar.gz \
-            https://github.com/Traitome/oxo-flow/releases/latest/download/oxo-flow-latest-x86_64-unknown-linux-gnu.tar.gz
+            https://github.com/Traitome/oxo-flow/releases/download/v0.31.0/oxo-flow-v0.31.0-x86_64-unknown-linux-gnu.tar.gz
           tar xzf oxo-flow.tar.gz
           sudo mv oxo-flow /usr/local/bin/
           oxo-flow --version

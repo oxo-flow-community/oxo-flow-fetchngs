@@ -1,5 +1,5 @@
-# oxo-flow port of nf-core/fetchngs 1.12.0
-# (https://github.com/nf-core/fetchngs, commit 8ec2d934f9301c818d961b1e4fdf7fc79610bdc5)
+# oxo-flow port of nf-core/fetchngs 1.13.0
+# (https://github.com/nf-core/fetchngs, commit 955c892d80927cee633765e6e390f9cc6b7235c9)
 #
 # Default-parameters main execution path: samplesheet check -> ENA metadata
 # fetch -> FastQ download (FTP, download_method = 'ftp') -> auto-created
@@ -8,8 +8,18 @@
 # The alternative download branches are ported as when-gated rules, all off
 # by default (download_method = 'ftp', matching upstream):
 #   - 'sratools'  -> sra_prefetch + sra_fastq_sratools (prefetch/fasterq-dump
-#                    incl. the .sralite variant, sra-tools 3.0.8 / 2.11.0)
-#   - 'aspera'    -> sra_fastq_aspera (Aspera CLI 4.14.0, ENA fasp links)
+#                    with sra-tools 3.2.1 — per-run prefetch directories +
+#                    vdb-validate/md5 integrity — and fasterq-dump 3.2.1 with
+#                    the 1.13.0 --outfile <id>.fastq + "exclude third file"
+#                    handling, pigz 2.8)
+#   - 'aspera'    -> sra_fastq_aspera (Aspera CLI 4.20.0, ENA fasp links; the
+#                    ascp client is downloaded at runtime via
+#                    `ascli conf ascp install` and the RSA bypass key is the
+#                    upstream asset assets/aspera_bypass_rsa.pem)
+#   - 'fastq-dl'  -> sra_fastq_fastqdl (fastq-dl 4.0.1 via ENA's own mirrors;
+#                    upstream also triages runs without download links to
+#                    prefetch/fasterq-dump for this method — the sra-tools
+#                    fallback rules carry that triage)
 #   - per-run fallback (upstream `branch` triage, gated on
 #     sra_tools_fallback = true): with download_method = 'ftp', runs without
 #     FTP/fasp links go to prefetch/fasterq-dump -> sra_prefetch_fallback +
@@ -20,29 +30,36 @@
 #     methods)
 #   - dbGaP (--dbgap_key) -> sra_prefetch_dbgap + sra_fastq_sratools_dbgap,
 #     gated on dbgap_key being set; the certificate is passed through
-#     verbatim (--ngc/--perm), the port itself needs no credentials
+#     verbatim (--ngc/--perm), the port itself needs no credentials; like
+#     upstream, a configured certificate is also honoured on the per-run
+#     triage branches (upstream passes params.dbgap_key to the sratools
+#     subworkflow for every download method)
 # The nf-core boilerplate (versions.yml collection) stays excluded — see the
 # fidelity table in README.md. PIPELINE_COMPLETION (completion email, failure
-# email, webhook notification) is ported onto the workflow-level terminal
-# hooks below (engine >= 0.17.0; unknown [workflow] keys on older engines are
-# ignored, so the released-engine default plan is unchanged).
+# email) is ported onto the workflow-level terminal hooks below (engine >=
+# 0.17.0; unknown [workflow] keys on older engines are ignored, so the
+# released-engine default plan is unchanged). Upstream 1.13.0 dropped the
+# hook_url / imNotification webhook feature, so this port has no webhook
+# branch either.
 # The hooks are best-effort and no-op by default: they fire only when
-# [config] email / email_on_fail / hook_url are set (see below).
+# [config] email / email_on_fail are set (see below).
 
 [workflow]
 name = "fetchngs"
-version = "1.12.0"
+version = "1.13.0"
 description = "Fetch metadata and raw FastQ files from public databases (SRA/ENA/DDBJ/GEO) - oxo-flow port of nf-core/fetchngs"
 author = "oxo-flow-community"
-# nf-core PIPELINE_COMPLETION (workflow.onComplete) -> engine terminal hooks:
-# on_complete fires once after a run with no failed rules, on_error after a
-# run with at least one failure (including --keep-going runs). Both render
-# {config.*} and the {succeeded}/{failed}/{skipped} counters, run in the
-# workflow root with the workflow shell_prelude, and never change the run
-# status (best-effort). scripts/pipeline_completion.sh does the guarded
-# sendmail/mail + curl work and always exits 0.
-on_complete = 'bash scripts/pipeline_completion.sh completed "{config.email}" "{config.email_on_fail}" "{config.hook_url}" {succeeded} {failed} {skipped} {config.out_dir}'
-on_error = 'bash scripts/pipeline_completion.sh failed "{config.email}" "{config.email_on_fail}" "{config.hook_url}" {succeeded} {failed} {skipped} {config.out_dir}'
+# nf-core PIPELINE_COMPLETION (workflow.onComplete / workflow.onError, 1.13.0)
+# -> engine terminal hooks: on_complete fires once after a run with no failed
+# rules, on_error after a run with at least one failure (including
+# --keep-going runs). Both render {config.*} and the {succeeded}/{failed}/
+# {skipped} counters, run in the workflow root with the workflow shell_prelude,
+# and never change the run status (best-effort). scripts/pipeline_completion.sh
+# does the guarded sendmail/mail work, echoes the upstream onError
+# troubleshooting note on failed runs, and always exits 0. Upstream 1.13.0
+# removed the hook_url / imNotification webhook branch together with this port.
+on_complete = 'bash scripts/pipeline_completion.sh completed "{config.email}" "{config.email_on_fail}" {succeeded} {failed} {skipped} {config.out_dir}'
+on_error = 'bash scripts/pipeline_completion.sh failed "{config.email}" "{config.email_on_fail}" {succeeded} {failed} {skipped} {config.out_dir}'
 
 [config]
 # File containing SRA/ENA/GEO/DDBJ identifiers, one per line (upstream --input).
@@ -53,7 +70,9 @@ input = "test/fixtures/ids.txt"
 out_dir = "results"
 # Comma-separated ENA metadata fields; empty = upstream default field list.
 ena_metadata_fields = ""
-# Download method, one of 'ftp' (upstream default), 'sratools' or 'aspera'.
+# Download method, one of 'ftp' (upstream default), 'sratools', 'aspera' or
+# 'fastq-dl' (upstream 1.13.0: fastq-dl queries ENA directly and downloads
+# from ENA's own mirrors, bypassing NCBI/SRA endpoints).
 # Each method gates its own branch of download rules; the default 'ftp'
 # plan is unchanged when the other branches are off.
 download_method = "ftp"
@@ -69,7 +88,11 @@ skip_fastq_download = false
 #     the FTP branch when they have an FTP link (fastq_1,
 #     sra_fastq_ftp_aspera_fallback) and to prefetch + fasterq-dump
 #     otherwise (the same fallback rules).
-# Without it, such runs are skipped with a warning.
+# Without it, such runs are skipped with a warning. With
+# download_method = 'fastq-dl' the triage runs UNCONDITIONALLY (upstream
+# 1.13.0 routes runs without download links to the sratools subworkflow for
+# every method): the same two fallback rules carry it regardless of this
+# toggle.
 sra_tools_fallback = false
 # dbGaP authorized-access certificate for the sratools branch (upstream
 # --dbgap_key): path to a .ngc or .jwt file. Empty = public data only — the
@@ -78,28 +101,31 @@ sra_tools_fallback = false
 # Declared sensitive so the value is env-routed and never lands in plaintext
 # in command records, logs, or the checkpoint (lint W032).
 dbgap_key = { default = "", sensitive = true }
-# nf-core pipeline to tailor the samplesheet for (rnaseq/atacseq/taxprofiler); empty = none.
+# nf-core pipeline to tailor the samplesheet for (upstream 1.13.0 schema
+# enum: ampliseq / atacseq / mag / metatdenovo / rnaseq / sarek / taxprofiler /
+# viralrecon; metatdenovo and viralrecon add no extra columns); empty = none.
 nf_core_pipeline = ""
 nf_core_rnaseq_strandedness = "auto"
 sample_mapping_fields = "experiment_accession,run_accession,sample_accession,experiment_alias,run_alias,sample_alias,experiment_title,sample_title,sample_description"
 # Completion notifications (upstream PIPELINE_COMPLETION, --email /
-# --email_on_fail / --hook_url; upstream defaults are null, here ""):
+# --email_on_fail; upstream defaults are null, here ""):
 #   - email          address the completion summary is mailed to (sendmail/mail
 #                    on the host) after a run without failed rules
 #   - email_on_fail  address mailed after a failed run; falls back to `email`
 #                    when empty (nf-core sends the failure mail to email_on_fail,
 #                    or to email when only that is set)
-#   - hook_url       webhook URL receiving a JSON notification (curl POST) with
-#                    the run counters, on completion and failure alike
+# Upstream 1.13.0 removed --hook_url / imNotification (the webhook JSON-card
+# path and its assets/adaptivecard.json + assets/slackreport.json payloads
+# were dropped), so there is no webhook branch here either; the upstream
+# workflow.onError troubleshooting note is echoed by the hook script.
 # These drive the [workflow] on_complete / on_error hooks above (engine >=
-# 0.17.0). With all three empty (the default) both hooks are no-ops, matching
+# 0.17.0). With both empty (the default) both hooks are no-ops, matching
 # upstream's null params; older engines ignore the [workflow] keys entirely.
 # sraCurateSamplesheetWarn (the upstream end-of-run "double-check the
 # samplesheet" log note) has no hook: the auto-created samplesheet curation
 # caveat is documented in README.md instead.
 email = ""
 email_on_fail = ""
-hook_url = ""
 
 # One sample source for the default path (playbook §2.4): the database ids.
 [[sample_groups]]
@@ -142,11 +168,15 @@ shell = """
 # rules, and a fixed `id.txt` let parallel id rules clobber each other
 # (live: all three runinfo tsvs held the same id's row).
 echo {sample} > ".id_{sample}.txt"
-metadata_fields=""
+metadata_args=()
 if [ -n "{config.ena_metadata_fields}" ]; then
-    metadata_fields="--ena_metadata_fields {config.ena_metadata_fields}"
+    # Upstream 1.13.0 SRA_IDS_TO_RUNINFO (nf-core/fetchngs PR 381): quote the
+    # list and collapse whitespace around commas so metadata fields with
+    # spaces cannot word-split.
+    fields=$(printf '%s' "{config.ena_metadata_fields}" | sed 's/[[:space:]]*,[[:space:]]*/,/g')
+    metadata_args=(--ena_metadata_fields "$fields")
 fi
-python scripts/sra_ids_to_runinfo.py ".id_{sample}.txt" {output[0]} $metadata_fields
+python scripts/sra_ids_to_runinfo.py ".id_{sample}.txt" {output[0]} "${metadata_args[@]}"
 rm -f ".id_{sample}.txt"
 """
 retries = 2
@@ -235,7 +265,7 @@ tail -n +2 "$tsv" | while read -r line; do
         if [ -f "$out" ] && printf '%s  %s\n' "$expected" "$base" | (cd "$fastq_dir" && md5sum -c - > /dev/null 2>&1); then
             return 0
         fi
-        wget -t 5 -nv -c -T 60 -O "$out" "$url" || exit 1
+        wget -t 5 -nv -w 5 --random-wait -c -T 60 -O "$out" "$url" || exit 1
         printf '%s  %s\n' "$expected" "$base" > "$md5_dir/${base}.md5"
         (cd "$fastq_dir" && md5sum -c "md5/${base}.md5") || exit 1
     }
@@ -258,7 +288,10 @@ memory = "12G"
 time_limit = "4h"
 
 [rules.environment]
-docker = "quay.io/biocontainers/wget:1.20.1"
+# Upstream 1.13.0 moved this process from biocontainers/wget:1.20.1 to the
+# Seqera Wave image bundling gzip 1.14 + wget 1.25.0 (DNS-resolution fix);
+# md5sum comes from the image's coreutils, as before.
+docker = "community.wave.seqera.io/library/gzip_wget:041a8ba200c3fa3f"
 
 # ---------------------------------------------------------------------------
 # SRA-tools download path (upstream CUSTOM_SRATOOLSNCBISETTINGS +
@@ -270,12 +303,15 @@ docker = "quay.io/biocontainers/wget:1.20.1"
 # ported as a when-gated branch (sra_prefetch_fallback +
 # sra_fastq_sratools_fallback, off by default via sra_tools_fallback = false
 # so the default plan is unchanged); without it, ftp-method runs without
-# FTP links are skipped with a warning (see sra_fastq_ftp). Prefetch writes
-# <run_accession>.sra / .sralite into results/sra/<id>/ (upstream publishDir
-# results/sra, enabled: false — the files are intermediates for
-# fasterq-dump only). The NCBI settings file (fresh GUID, upstream
-# CUSTOM_SRATOOLSNCBISETTINGS) is written per sample because the docker
-# workdir is shared across concurrent rules.
+# FTP links are skipped with a warning (see sra_fastq_ftp). Prefetch writes a
+# per-run directory results/sra/<id>/<run_accession>/ (upstream 1.13.0:
+# sra-tools 3.2.1 prefetch emits ETL directories, output
+# path("${id}", type: 'dir'), under the publishDir results/sra, enabled:
+# false — the files are intermediates for fasterq-dump only). Integrity is
+# checked with vdb-validate and, when the archive carries no checksums, an
+# md5 comparison against the NCBI locate endpoint (upstream PR 305). The NCBI
+# settings file (fresh GUID, upstream CUSTOM_SRATOOLSNCBISETTINGS) is written
+# per sample because the docker workdir is shared across concurrent rules.
 # ---------------------------------------------------------------------------
 [[rules]]
 name = "sra_prefetch"
@@ -319,6 +355,10 @@ tail -n +2 "$tsv" | while read -r line; do
     fi
     (
         cd "$sra_dir"
+        # Upstream 1.13.0 SRATOOLS_PREFETCH script block echoes the effective
+        # retry policy (args2) and the final prefetch arguments.
+        echo "5 1 100"
+        echo ""
         set +e
         retry_with_backoff 5 1 100 prefetch "$run"
         prefetch_status=$?
@@ -327,10 +367,18 @@ tail -n +2 "$tsv" | while read -r line; do
             echo "prefetch failed for $run after retries" >&2
             exit "$prefetch_status"
         fi
-        if [ -f "$run.sralite" ]; then
-            vdb-validate "$run.sralite"
-        else
-            vdb-validate "$run"
+        # check file integrity using vdb-validate or (when archive contains
+        # no checksums) md5sum (upstream 1.13.0 retry_with_backoff.sh; the
+        # 1.12.0 .sralite branch is gone — sra-tools 3.2.1 prefetch writes a
+        # per-run directory)
+        vdb-validate "$run" > vdb-validate_result.txt 2>&1 || exit 1
+        if grep -q "checksums missing" vdb-validate_result.txt; then
+            VALID_MD5SUMS=$(curl --silent --fail --location --retry 3 --retry-delay 60 "https://locate.ncbi.nlm.nih.gov/sdl/2/retrieve?filetype=run&acc=$run")
+            LOCAL_MD5SUMS=$(md5sum "$run"/* | cut -f1 -d' ')
+            if ! grep -q -F -f <(echo "$LOCAL_MD5SUMS") <(echo "$VALID_MD5SUMS"); then
+                echo "MD5 sum check failed" 1>&2
+                exit 1
+            fi
         fi
     )
 done
@@ -343,20 +391,26 @@ memory = "2G"
 time_limit = "4h"
 
 [rules.environment]
-docker = "quay.io/biocontainers/sra-tools:3.0.8--h9f5acd7_0"
+# sra-tools 3.2.1 (upstream 1.13.0 pin; the conda env additionally carries
+# curl for the md5 integrity fallback, PR 305)
+docker = "quay.io/biocontainers/sra-tools:3.2.1--h4304569_1"
 
 # ---------------------------------------------------------------------------
 # fasterq-dump + pigz (upstream SRATOOLS_FASTERQDUMP, download_method =
 # 'sratools')
 #
-# Converts the prefetched SRA records into compressed FastQ with the
-# upstream naming (`<id>.fastq.gz` single-end, `<id>_1.fastq.gz` +
-# `<id>_2.fastq.gz` paired, id = <experiment>_<run>) — identical to the FTP
-# branch — and moves them into results/fastq/. fasterq-dump runs in a
-# per-run temp dir so concurrent rule instances in the shared docker workdir
-# cannot cross-talk (pigz would otherwise glob another instance's fastq).
-# Same no-outputs convention as sra_fastq_ftp: the produced file set is
-# data-dependent.
+# Converts the prefetched SRA records (per-run directories written by
+# sra-tools 3.2.1) into compressed FastQ with the upstream 1.13.0 naming:
+# `--outfile <id>.fastq` for both layouts (`--split-files` yields
+# `<id>.fastq_1/_2` for paired runs; id = <experiment>_<run>), the paired
+# "third file" moved aside by the upstream `mv $outfile $prefix || echo 'No
+# third file'` guard — the workaround for the '.'-in-path bug
+# (ncbi/sra-tools#865) — then pigz. Files land in results/fastq/ and the
+# samplesheet references the actual per-branch file names (see
+# sra_to_samplesheet). fasterq-dump runs in a per-run temp dir so concurrent
+# rule instances in the shared docker workdir cannot cross-talk (pigz would
+# otherwise glob another instance's fastq). Same no-outputs convention as
+# sra_fastq_ftp: the produced file set is data-dependent.
 # ---------------------------------------------------------------------------
 [[rules]]
 name = "sra_fastq_sratools"
@@ -397,20 +451,23 @@ tail -n +2 "$tsv" | while read -r line; do
         echo "WARNING: no run accession for ${run_id}; skipping" >&2
         continue
     fi
-    sra_file="$sra_dir/$run.sra"
-    [ -f "$sra_file" ] || sra_file="$sra_dir/$run.sralite"
-    if [ ! -f "$sra_file" ]; then
-        echo "ERROR: prefetched SRA file for ${run} not found in $sra_dir" >&2
+    sra_file="$sra_dir/$run"
+    if [ ! -d "$sra_file" ]; then
+        echo "ERROR: prefetched SRA directory for ${run} not found in $sra_dir" >&2
         exit 1
     fi
     d=".fd_{sample}_${run}"
     mkdir -p "$d"
     (
         cd "$d"
-        if [ "$se" = "true" ]; then
-            fasterq-dump --split-files --include-technical --threads 2 --outfile "${run_id}.fastq" "$sra_file"
-        else
-            fasterq-dump --split-files --include-technical --threads 2 --outfile "$run_id" "$sra_file"
+        # Upstream 1.13.0 SRATOOLS_FASTERQDUMP: the outfile is always
+        # <prefix>.fastq; for paired-end runs the "third file" (the outfile
+        # itself) is moved out of pigz' *.fastq glob — the workaround for the
+        # '.'-in-path bug (ncbi/sra-tools#865).
+        outfile="${run_id}.fastq"
+        fasterq-dump --split-files --include-technical --threads 2 --outfile "$outfile" "$sra_file"
+        if [ "$se" != "true" ]; then
+            mv "$outfile" "$run_id" || echo 'No third file'
         fi
         pigz --no-name --processes 2 ./*.fastq
         mv ./*.fastq.gz "$fastq_dir/"
@@ -426,31 +483,132 @@ memory = "8G"
 time_limit = "4h"
 
 [rules.environment]
-docker = "quay.io/biocontainers/mulled-v2-5f89fe0cd045cb1d615630b9261a1d17943a9b6a:6a9ff0e76ec016c3d0d27e0c0d362339f2d787e6-0"
+# Upstream 1.13.0 replaced the patched mulled image (sra-tools 2.11.0 + pigz
+# 2.6) with the Seqera Wave image sra-tools 3.2.1 + pigz 2.8 (the module's
+# local sratools-fasterqdump.diff patch is gone).
+docker = "community.wave.seqera.io/library/sra-tools_pigz:4a694d823f6f7fcf"
+
+# ---------------------------------------------------------------------------
+# fastq-dl download path (upstream FASTQDL module, download_method =
+# 'fastq-dl', added in nf-core/fetchngs 1.13.0, PR 353/395)
+#
+# fastq-dl queries ENA directly and downloads from ENA's own mirrors,
+# bypassing the NCBI/SRA endpoints (upstream module docs). The upstream
+# module runs `fastq-dl ${ext.args} --prefix <meta.id> --accession
+# <run_accession> --cpus <task.cpus> --outdir .` — ext.args is unset for
+# this process (no withName block adds it), so no extra flags. The tool's
+# own output names are carried into the samplesheet (see sra_to_samplesheet:
+# `<run>[_1|_2].fastq.gz`), and the module's publishDirs stage
+# `<meta.id>-run-info.tsv` (+ the paired-run `<meta.id>-run-mergers.tsv`,
+# upstream output optional: true) into the metadata dir — replicated by the
+# moves below. Upstream's `branch` routes every run that has an FTP or fasp
+# link here under this method; runs without either link go to the sratools
+# subworkflow — the when-gated sra_prefetch_fallback /
+# sra_fastq_sratools_fallback rules carry that triage unconditionally for
+# this method (their filter skips exactly the rows this rule processes).
+# No outputs declared on purpose (data-dependent file set, same convention as
+# the other download rules); the fastq-dl tool's own checksum verification is
+# the integrity gate — upstream adds no md5sum pass for this branch.
+# ---------------------------------------------------------------------------
+[[rules]]
+name = "sra_fastq_fastqdl"
+description = "Download FastQ files per run with fastq-dl from the ENA mirrors and stage the run-info/mergers tables"
+input = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
+output = []
+when = '!config.skip_fastq_download && config.download_method == "fastq-dl"'
+shell = """
+set -eu
+tsv="{input}"
+fastq_dir="{config.out_dir}/fastq"
+meta_dir="{config.out_dir}/metadata"
+mkdir -p "$fastq_dir" "$meta_dir"
+
+# Resolve column indices from the header (default ENA metadata fields)
+header=$(head -n 1 "$tsv")
+col_of() {
+    printf '%s\\n' "$header" | tr '\\t' '\\n' | grep -nx "$1" | cut -d: -f1
+}
+c_id=$(col_of id)
+c_run=$(col_of run_accession)
+c_fq1=$(col_of fastq_1)
+c_fasp=$(col_of fastq_aspera)
+
+# One row per run: runs without both download links are triaged to the
+# sratools fallback rules (upstream branch), everything else goes to fastq-dl
+tail -n +2 "$tsv" | while read -r line; do
+    run_id=$(printf '%s' "$line" | cut -f "$c_id")
+    run=$(printf '%s' "$line" | cut -f "$c_run")
+    fq1=$(printf '%s' "$line" | cut -f "$c_fq1")
+    fasp=$(printf '%s' "$line" | cut -f "$c_fasp")
+    if [ -z "$fq1" ] && [ -z "$fasp" ]; then
+        echo "WARNING: no FTP/fasp link for ${run_id}; handled by the per-run sratools fallback (sra_prefetch_fallback + sra_fastq_sratools_fallback), skipping here" >&2
+        continue
+    fi
+    if [ -z "$run" ]; then
+        echo "WARNING: no run accession for ${run_id}; skipping" >&2
+        continue
+    fi
+    d=".fdl_{sample}_${run}"
+    mkdir -p "$d"
+    (
+        cd "$d"
+        # Upstream FASTQDL script block (task.ext.args empty for this process)
+        fastq-dl \\
+            --prefix ${run_id} \\
+            --accession ${run} \\
+            --cpus 2 \\
+            --outdir .
+        mv ./*.fastq.gz "$fastq_dir/"
+        mv ${run_id}-run-info.tsv "$meta_dir/"
+        if [ -f ${run_id}-run-mergers.tsv ]; then
+            mv ${run_id}-run-mergers.tsv "$meta_dir/"
+        fi
+    )
+    rm -rf "$d"
+done
+"""
+# Upstream FASTQDL carries no error_retry label; the base config retries
+# once on infrastructure exit statuses -> port-side equivalent retries = 1.
+retries = 1
+
+[rules.resources]
+threads = 2
+memory = "12G"
+time_limit = "4h"
+
+[rules.environment]
+# Upstream 1.13.0 FASTQDL pin (Seqera Wave, fastq-dl 4.0.1, PR 395)
+docker = "community.wave.seqera.io/library/fastq-dl:4.0.1--fd5420f75c055a44"
 
 # ---------------------------------------------------------------------------
 # Per-run sra-tools fallback (upstream SRA workflow `branch`, download_method
-# = 'ftp' / 'aspera' + sra_tools_fallback = true)
+# = 'ftp' / 'aspera' + sra_tools_fallback = true; for download_method =
+# 'fastq-dl' the same two rules carry the upstream triage unconditionally)
 #
 # Upstream triages each run at runtime: runs whose metadata has NEITHER an
 # FTP link (fastq_1) NOR a fasp link (fastq_aspera) are sent to prefetch +
 # fasterq-dump per run (branch condition `!meta.fastq_aspera && !meta.fastq_1`)
-# — for download_method = 'ftp' AND 'aspera' alike. oxo-flow cannot branch
-# per row, so the triage is ported as when-gated branches off by default:
-# when enabled, these two rules prefetch exactly that subset (the shared
-# scripts re-derive it from the runinfo tsv) and the FTP rule keeps
+# — for download_method = 'ftp', 'aspera' AND 'fastq-dl' alike. oxo-flow
+# cannot branch per row, so the triage is ported as when-gated branches:
+# off by default for 'ftp'/'aspera' (plan-stable), on by default for
+# 'fastq-dl'. When enabled, these two rules prefetch exactly that subset (the
+# shared scripts re-derive it from the runinfo tsv) and the FTP rule keeps
 # downloading the runs that do have links; under 'aspera' the FTP-link-but-
-# no-fasp subset is downloaded by sra_fastq_ftp_aspera_fallback. Same
-# no-outputs convention as the sratools-method branch: intermediates land in
-# results/sra/{sample}/, the produced fastq set is data-dependent.
+# no-fasp subset is downloaded by sra_fastq_ftp_aspera_fallback. Like
+# upstream (which passes params.dbgap_key to the sratools subworkflow for
+# every method), a configured dbGaP certificate flows into the triage too —
+# the public path (empty dbgap_key) is unchanged. Same no-outputs convention
+# as the sratools-method branch: intermediates land in
+# results/sra/{sample}/ (per-run directories with sra-tools 3.2.1), the
+# produced fastq set is data-dependent.
 # ---------------------------------------------------------------------------
 [[rules]]
 name = "sra_prefetch_fallback"
 description = "Prefetch SRA records for runs without FTP/fasp links (upstream per-run sratools fallback) and validate them with vdb-validate"
 input = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
 output = []
-when = '!config.skip_fastq_download && (config.download_method == "ftp" || config.download_method == "aspera") && config.sra_tools_fallback'
-shell = "bash scripts/sra_prefetch_runs.sh --fallback \"{input}\" \"{config.out_dir}/sra/{sample}\""
+when = '!config.skip_fastq_download && (((config.download_method == "ftp" || config.download_method == "aspera") && config.sra_tools_fallback) || config.download_method == "fastq-dl")'
+shell = "bash scripts/sra_prefetch_runs.sh --fallback \"{input}\" \"{config.out_dir}/sra/{sample}\" \"{config.dbgap_key}\""
 retries = 2
 
 [rules.resources]
@@ -459,7 +617,7 @@ memory = "2G"
 time_limit = "4h"
 
 [rules.environment]
-docker = "quay.io/biocontainers/sra-tools:3.0.8--h9f5acd7_0"
+docker = "quay.io/biocontainers/sra-tools:3.2.1--h4304569_1"
 
 [[rules]]
 name = "sra_fastq_sratools_fallback"
@@ -467,8 +625,8 @@ description = "Convert prefetched SRA records of fallback runs to compressed Fas
 input = ["{config.out_dir}/metadata/{sample}.runinfo_ftp.tsv"]
 output = []
 depends_on = ["sra_prefetch_fallback"]
-when = '!config.skip_fastq_download && (config.download_method == "ftp" || config.download_method == "aspera") && config.sra_tools_fallback'
-shell = "bash scripts/sra_fastq_sratools_runs.sh --fallback \"{input}\" \"{config.out_dir}/sra/{sample}\" \"{config.out_dir}/fastq\""
+when = '!config.skip_fastq_download && (((config.download_method == "ftp" || config.download_method == "aspera") && config.sra_tools_fallback) || config.download_method == "fastq-dl")'
+shell = "bash scripts/sra_fastq_sratools_runs.sh --fallback \"{input}\" \"{config.out_dir}/sra/{sample}\" \"{config.out_dir}/fastq\" \"{config.dbgap_key}\""
 retries = 2
 
 [rules.resources]
@@ -477,7 +635,7 @@ memory = "8G"
 time_limit = "4h"
 
 [rules.environment]
-docker = "quay.io/biocontainers/mulled-v2-5f89fe0cd045cb1d615630b9261a1d17943a9b6a:6a9ff0e76ec016c3d0d27e0c0d362339f2d787e6-0"
+docker = "community.wave.seqera.io/library/sra-tools_pigz:4a694d823f6f7fcf"
 
 # ---------------------------------------------------------------------------
 # dbGaP branch (upstream --dbgap_key, download_method = 'sratools' +
@@ -507,7 +665,7 @@ memory = "2G"
 time_limit = "4h"
 
 [rules.environment]
-docker = "quay.io/biocontainers/sra-tools:3.0.8--h9f5acd7_0"
+docker = "quay.io/biocontainers/sra-tools:3.2.1--h4304569_1"
 
 [[rules]]
 name = "sra_fastq_sratools_dbgap"
@@ -525,20 +683,26 @@ memory = "8G"
 time_limit = "4h"
 
 [rules.environment]
-docker = "quay.io/biocontainers/mulled-v2-5f89fe0cd045cb1d615630b9261a1d17943a9b6a:6a9ff0e76ec016c3d0d27e0c0d362339f2d787e6-0"
+docker = "community.wave.seqera.io/library/sra-tools_pigz:4a694d823f6f7fcf"
 
 # ---------------------------------------------------------------------------
 # Aspera download path (upstream ASPERA_CLI, download_method = 'aspera')
 #
 # Downloads via the ENA fasp links with the Aspera CLI shipped in the pinned
-# biocontainer (anonymous `era-fasp` user + pre-installed bypass key — no
-# credentials; the image is the same upstream uses). ascp flags
-# `-QT -l 300m -P33001` from the upstream module config. Upstream also sends
-# runs without fasp links to the ftp / sra-tools branches per run; that
-# triage is ported as when-gated branches (sra_fastq_ftp_aspera_fallback +
-# sra_prefetch_fallback / sra_fastq_sratools_fallback, all on
-# sra_tools_fallback = true); without it, such runs are skipped with a
-# warning (deviation, see README).
+# biocontainer (anonymous `era-fasp` user — no credentials; the image is the
+# same upstream uses). Upstream 1.13.0 BREAKING change (PR 398/399): aspera-
+# cli moved 4.14.0 -> 4.20.0 and the image no longer bundles the ascp
+# client — the command bootstraps it at runtime via `ascli conf ascp install`
+# (the upstream per-process script header, executed once per rule here), so
+# the compute node needs outbound internet; and the bypass key switched from
+# the in-image DSA key to the RSA asset assets/aspera_bypass_rsa.pem (DSA is
+# deprecated), shipped here byte-identical to the upstream module asset.
+# ascp args `-QT -l 300m -P33001` from the upstream module config. Upstream
+# also sends runs without fasp links to the ftp / sra-tools branches per
+# run; that triage is ported as when-gated branches
+# (sra_fastq_ftp_aspera_fallback + sra_prefetch_fallback /
+# sra_fastq_sratools_fallback, all on sra_tools_fallback = true); without
+# it, such runs are skipped with a warning (deviation, see README).
 # ---------------------------------------------------------------------------
 [[rules]]
 name = "sra_fastq_aspera"
@@ -548,6 +712,20 @@ output = []
 when = '!config.skip_fastq_download && config.download_method == "aspera"'
 shell = """
 set -eu
+
+# Upstream ASPERA_CLI 1.13.0 script header: the 4.20.0 image no longer ships
+# ascp; download it at runtime (idempotent) and locate the binary. The RSA
+# bypass key is the upstream module asset (DSA key deprecated).
+export GEM_HOME="${GEM_HOME:-/usr/local/share/rubygems}"
+if [ ! -w "${HOME:-/}" ]; then
+    export HOME=$(mktemp -d)
+fi
+if [ ! -d "${HOME}/.aspera/sdk" ]; then
+    ascli conf ascp install 1>&2
+fi
+ASCP=$(find "${HOME}/.aspera/sdk" -name "ascp" -type f | head -1)
+BYPASS_KEY="assets/aspera_bypass_rsa.pem"
+
 tsv="{input}"
 fastq_dir="{config.out_dir}/fastq"
 md5_dir="$fastq_dir/md5"
@@ -585,7 +763,9 @@ tail -n +2 "$tsv" | while read -r line; do
             return 0
         fi
         rm -f "$out"
-        ascp -QT -l 300m -P33001 -i /usr/local/etc/aspera/aspera_bypass_dsa.pem "era-fasp@$url" "$out" || exit 1
+        # Upstream 1.13.0 invokes the runtime-installed client with the RSA
+        # bypass key (upstream script: `"$ASCP" ${args} -i "$BYPASS_KEY" ...`)
+        "$ASCP" -QT -l 300m -P33001 -i "$BYPASS_KEY" "era-fasp@$url" "$out" || exit 1
         printf '%s  %s\\n' "$expected" "$base" > "$md5_dir/${base}.md5"
         (cd "$fastq_dir" && md5sum -c "md5/${base}.md5") || exit 1
     }
@@ -609,7 +789,10 @@ memory = "4G"
 time_limit = "4h"
 
 [rules.environment]
-docker = "quay.io/biocontainers/aspera-cli:4.14.0--hdfd78af_1"
+# aspera-cli 4.20.0--hdfd78af_0 (upstream 1.13.0 pin; conda env
+# bioconda::aspera-cli=4.20.0). ascp itself arrives at runtime via the
+# script header above — the image only carries the ascli bootstrapper.
+docker = "quay.io/biocontainers/aspera-cli:4.20.0--hdfd78af_0"
 
 # ---------------------------------------------------------------------------
 # Per-run FTP fallback for the aspera method (upstream SRA workflow
@@ -642,10 +825,14 @@ memory = "12G"
 time_limit = "4h"
 
 [rules.environment]
-docker = "quay.io/biocontainers/wget:1.20.1"
+# Same Seqera Wave gzip+wget image as sra_fastq_ftp (upstream 1.13.0)
+docker = "community.wave.seqera.io/library/gzip_wget:041a8ba200c3fa3f"
 
 # ---------------------------------------------------------------------------
-# Auto-create samplesheet + id mappings (upstream SRA_TO_SAMPLESHEET)
+# Auto-create samplesheet + id mappings (upstream SRA_TO_SAMPLESHEET in
+# 1.12.0; in 1.13.0 the logic lives in the CHANNEL_SRA_CREATE_CSV
+# subworkflow's buildPipelineMap + the per-run FastQ-name rewrite in
+# workflows/fetchngs.nf)
 # ---------------------------------------------------------------------------
 [[rules]]
 name = "sra_to_samplesheet"
@@ -659,10 +846,12 @@ output = [
 # + sra_tools_fallback/dbgap_key); the others are skipped and skipped rules
 # satisfy dependencies, so listing all of them is safe. The samplesheet must
 # wait for every branch: whichever one runs produces the fastq files the
-# sheet references (all branches use the same file naming).
+# sheet references (the file naming follows the upstream 1.13.0 `branch`
+# closure per run — see scripts/sra_to_samplesheet.py).
 depends_on = [
     "sra_fastq_ftp",
     "sra_fastq_sratools",
+    "sra_fastq_fastqdl",
     "sra_fastq_aspera",
     "sra_fastq_ftp_aspera_fallback",
     "sra_prefetch_fallback",
@@ -671,7 +860,7 @@ depends_on = [
     "sra_fastq_sratools_dbgap",
 ]
 when = "!config.skip_fastq_download"
-shell = "python scripts/sra_to_samplesheet.py \"{input}\" \"{output[0]}\" \"{output[1]}\" \"{config.out_dir}\" \"{config.nf_core_pipeline}\" \"{config.nf_core_rnaseq_strandedness}\" \"{config.sample_mapping_fields}\""
+shell = "python scripts/sra_to_samplesheet.py \"{input}\" \"{output[0]}\" \"{output[1]}\" \"{config.out_dir}\" \"{config.nf_core_pipeline}\" \"{config.nf_core_rnaseq_strandedness}\" \"{config.sample_mapping_fields}\" \"{config.download_method}\""
 localrule = true
 
 [rules.resources]
@@ -704,15 +893,15 @@ files=$(echo {input} | tr ' ' '\\n' | sort)
 if [ -z "$files" ]; then
     : > "$out"
 else
-    first=1
+    # Upstream CHANNEL_SRA_CREATE_CSV (1.13.0): collectFile(newLine: true,
+    # keepHeader: true, sort: true) — the header is kept once and the value
+    # rows are sorted lexicographically (Groovy natural String order = byte
+    # order; the per-id files all carry the identical header, so sorting the
+    # collected "header\\nvalues" strings reduces to sorting the value rows).
+    head -n 1 $(echo "$files" | head -n 1) > "$out"
     for f in $files; do
-        if [ "$first" -eq 1 ]; then
-            cat "$f" > "$out"
-            first=0
-        else
-            tail -n +2 "$f" >> "$out"
-        fi
-    done
+        tail -n +2 "$f"
+    done | LC_ALL=C sort >> "$out"
 fi
 """
 
@@ -742,15 +931,13 @@ files=$(echo {input} | tr ' ' '\\n' | sort)
 if [ -z "$files" ]; then
     : > "$out"
 else
-    first=1
+    # Upstream CHANNEL_SRA_CREATE_CSV (1.13.0): collectFile(newLine: true,
+    # keepHeader: true, sort: true) — header kept once, value rows sorted
+    # lexicographically (see the combine_samplesheets note).
+    head -n 1 $(echo "$files" | head -n 1) > "$out"
     for f in $files; do
-        if [ "$first" -eq 1 ]; then
-            cat "$f" > "$out"
-            first=0
-        else
-            tail -n +2 "$f" >> "$out"
-        fi
-    done
+        tail -n +2 "$f"
+    done | LC_ALL=C sort >> "$out"
 fi
 """
 
