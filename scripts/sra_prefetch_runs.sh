@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Shared per-run sra-tools prefetch loop for the when-gated branches of the
-# oxo-flow-fetchngs port (upstream SRATOOLS_PREFETCH + CUSTOM_SRATOOLSNCBISETTINGS):
+# oxo-flow-fetchngs port (upstream SRATOOLS_PREFETCH + CUSTOM_SRATOOLSNCBISETTINGS,
+# 1.13.0):
 #   - sra_prefetch_dbgap     (download_method = 'sratools', dbgap_key set)
-#   - sra_prefetch_fallback  (download_method = 'ftp', sra_tools_fallback)
+#   - sra_prefetch_fallback  (download_method = 'ftp'/'aspera' + sra_tools_fallback,
+#                             and the per-run triage of download_method = 'fastq-dl')
 # The default-config rules (sra_prefetch / sra_fastq_sratools in main.oxoflow)
 # carry the same logic inline: their rendered command is frozen by the
 # byte-identical dry-run contract, so new branches live here instead.
@@ -12,7 +14,10 @@
 #               (fastq_1) NOR a fasp link (fastq_aspera) — the upstream
 #               branch condition `!meta.fastq_aspera && !meta.fastq_1`
 #   certificate dbGaP authorized-access certificate; `.ngc` -> `--ngc`,
-#               `.jwt` -> `--perm` (upstream SRATOOLS_PREFETCH shell logic)
+#               `.jwt` -> `--perm` (upstream SRATOOLS_PREFETCH shell logic;
+#               like upstream the certificate is also honoured on the triage
+#               branches — upstream passes params.dbgap_key to the sratools
+#               subworkflow for every download method)
 set -eu
 
 fallback=false
@@ -72,6 +77,10 @@ tail -n +2 "$tsv" | while read -r line; do
     fi
     (
         cd "$sra_dir"
+        # Upstream 1.13.0 SRATOOLS_PREFETCH script block echoes the effective
+        # retry policy (args2) and the final prefetch arguments.
+        echo "5 1 100"
+        echo "$cert_args"
         set +e
         retry_with_backoff 5 1 100 prefetch $cert_args "$run"
         prefetch_status=$?
@@ -80,10 +89,18 @@ tail -n +2 "$tsv" | while read -r line; do
             echo "prefetch failed for $run after retries" >&2
             exit "$prefetch_status"
         fi
-        if [ -f "$run.sralite" ]; then
-            vdb-validate "$run.sralite"
-        else
-            vdb-validate "$run"
+        # check file integrity using vdb-validate or (when archive contains
+        # no checksums) md5sum (upstream 1.13.0 retry_with_backoff.sh; the
+        # 1.12.0 .sralite branch is gone — sra-tools 3.2.1 prefetch writes a
+        # per-run directory)
+        vdb-validate "$run" > vdb-validate_result.txt 2>&1 || exit 1
+        if grep -q "checksums missing" vdb-validate_result.txt; then
+            VALID_MD5SUMS=$(curl --silent --fail --location --retry 3 --retry-delay 60 "https://locate.ncbi.nlm.nih.gov/sdl/2/retrieve?filetype=run&acc=$run")
+            LOCAL_MD5SUMS=$(md5sum "$run"/* | cut -f1 -d' ')
+            if ! grep -q -F -f <(echo "$LOCAL_MD5SUMS") <(echo "$VALID_MD5SUMS"); then
+                echo "MD5 sum check failed" 1>&2
+                exit 1
+            fi
         fi
     )
 done

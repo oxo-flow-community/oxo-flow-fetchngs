@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """oxo-flow port of the nf-core/fetchngs input-id validation.
 
-Ports the `isSraId` / id-channel logic of the PIPELINE_INITIALISATION
-subworkflow (nf-core/fetchngs 1.12.0): validates every identifier in FILE_IN
-against the upstream SRA / ENA / DDBJ / GEO accession regex, then writes the
-stripped, deduplicated ids (upstream `Channel.from(...).splitCsv(...).unique()`)
-to FILE_OUT.
+Validates every identifier in FILE_IN against the upstream SRA / ENA / DDBJ /
+GEO accession regex and writes the stripped, deduplicated ids (upstream
+`samplesheetToList(...)` + `.unique()`) to FILE_OUT.
+
+In 1.12.0 this was the `isSraId` Groovy check of PIPELINE_INITIALISATION
+(subworkflows/local/utils_nfcore_fetchngs_pipeline/main.nf); in 1.13.0
+upstream moved the input validation into the input schema
+(assets/schema_input.json, same regex, checked via the nf-schema plugin's
+`samplesheetToList`), and oxo-flow has no such plugin — so this rule stays
+as the port-side enforcement point for the byte-identical 1.13.0 schema
+pattern. The upstream mixture-of-ids error wording belongs to the removed
+1.12.0 `isSraId`; the offending-id reporting is kept.
 
 Usage: check_ids.py <FILE_IN> <FILE_OUT>
 """
@@ -13,7 +20,9 @@ Usage: check_ids.py <FILE_IN> <FILE_OUT>
 import re
 import sys
 
-# Regex from `def isSraId(input)` in subworkflows/local/utils_nfcore_fetchngs_pipeline/main.nf
+# Regex identical in 1.12.0 `def isSraId(input)`
+# (subworkflows/local/utils_nfcore_fetchngs_pipeline/main.nf) and in the
+# 1.13.0 input schema items pattern (assets/schema_input.json)
 ID_PATTERN = re.compile(r"^(((SR|ER|DR)[APRSX])|(SAM(N|EA|D))|(PRJ(NA|EB|DB))|(GS[EM]))(\d+)$")
 
 

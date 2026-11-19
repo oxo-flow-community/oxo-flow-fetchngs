@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Verbatim copy of the `retry_with_backoff` helper from the upstream
-# nf-core/fetchngs 1.12.0 SRATOOLS_PREFETCH template
+# nf-core/fetchngs 1.13.0 SRATOOLS_PREFETCH template
 # (modules/nf-core/sratools/prefetch/templates/retry_with_backoff.sh),
-# sourced by the `sra_prefetch` rule shell. Upstream default retry policy
-# (ext.args2): 5 attempts, 1 s base delay, 100 s max delay.
+# sourced by the `sra_prefetch` rule shell. The helper body is unchanged
+# 1.12.0 -> 1.13.0 (only the template's Nextflow escaping style changed);
+# 1.13.0 moved the post-call integrity gate into the template as
+# `vdb-validate <id>` plus the md5sum comparison against the NCBI locate
+# endpoint for checksum-less archives — ported into the callers
+# (sra_prefetch inline rule + scripts/sra_prefetch_runs.sh). Upstream default
+# retry policy (ext.args2): 5 attempts, 1 s base delay, 100 s max delay.
 
 retry_with_backoff() {
     local max_attempts=${1}

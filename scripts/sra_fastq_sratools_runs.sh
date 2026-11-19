@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Shared per-run fasterq-dump + pigz loop for the when-gated branches of the
-# oxo-flow-fetchngs port (upstream SRATOOLS_FASTERQDUMP):
+# oxo-flow-fetchngs port (upstream SRATOOLS_FASTERQDUMP, 1.13.0):
 #   - sra_fastq_sratools_dbgap     (download_method = 'sratools', dbgap_key set)
-#   - sra_fastq_sratools_fallback  (download_method = 'ftp', sra_tools_fallback)
+#   - sra_fastq_sratools_fallback  (download_method = 'ftp'/'aspera' + sra_tools_fallback,
+#                                    and the per-run triage of download_method = 'fastq-dl')
 # See sra_prefetch_runs.sh for the sibling comment about the frozen inline
 # copies in main.oxoflow.
 #
@@ -70,20 +71,25 @@ tail -n +2 "$tsv" | while read -r line; do
         echo "WARNING: no run accession for ${run_id}; skipping" >&2
         continue
     fi
-    sra_file="$sra_dir/$run.sra"
-    [ -f "$sra_file" ] || sra_file="$sra_dir/$run.sralite"
-    if [ ! -f "$sra_file" ]; then
-        echo "ERROR: prefetched SRA file for ${run} not found in $sra_dir" >&2
+    # sra-tools 3.2.1 (upstream 1.13.0) prefetch emits a per-run DIRECTORY
+    # (upstream output: path("${id}", type: 'dir'))
+    sra_file="$sra_dir/$run"
+    if [ ! -d "$sra_file" ]; then
+        echo "ERROR: prefetched SRA directory for ${run} not found in $sra_dir" >&2
         exit 1
     fi
     d=".fd_${base}_${run}"
     mkdir -p "$d"
     (
         cd "$d"
-        if [ "$se" = "true" ]; then
-            fasterq-dump --split-files --include-technical --threads 2 --outfile "${run_id}.fastq" $key_file "$sra_file"
-        else
-            fasterq-dump --split-files --include-technical --threads 2 --outfile "$run_id" $key_file "$sra_file"
+        # Upstream 1.13.0 SRATOOLS_FASTERQDUMP: the outfile is always
+        # <prefix>.fastq; for paired-end runs the "third file" (the outfile
+        # itself) is moved out of pigz' *.fastq glob — the workaround for the
+        # '.'-in-path bug (ncbi/sra-tools#865).
+        outfile="${run_id}.fastq"
+        fasterq-dump --split-files --include-technical --threads 2 --outfile "$outfile" $key_file "$sra_file"
+        if [ "$se" != "true" ]; then
+            mv "$outfile" "$run_id" || echo 'No third file'
         fi
         pigz --no-name --processes 2 ./*.fastq
         mv ./*.fastq.gz "$fastq_dir/"
